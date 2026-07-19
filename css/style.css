@@ -1,0 +1,191 @@
+/* Cell Counter — styling. Calm, clinical dark theme; restrained. */
+:root {
+  --bg:#0f1419; --panel:#1b232c; --panel-edge:#2a3742; --ink:#e8edf2;
+  --muted:#93a1ad; --accent:#2f9e8f; --accent-press:#257d71;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { min-height:100vh; background:var(--bg); color:var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display:flex; flex-direction:column; align-items:center; }
+
+.topbar { width:100%; display:flex; align-items:baseline; justify-content:center; gap:10px; padding:18px 16px 6px; }
+.topbar h1 { font-size:1.15rem; font-weight:600; letter-spacing:0.3px; margin:0; }
+.phase-tag { font-family:var(--mono); font-size:0.68rem; color:var(--muted); border:1px solid var(--panel-edge); padding:2px 8px; border-radius:999px; }
+
+.card { width:100%; max-width:520px; background:var(--panel); border:1px solid var(--panel-edge);
+  border-radius:16px; padding:18px; margin:14px 14px 40px; box-shadow:0 10px 34px rgba(0,0,0,0.38); }
+
+/* profile row */
+.profile-row { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+.profile-label { font-size:0.8rem; color:var(--muted); }
+#profileSelect { flex:1; background:#0f1419; color:var(--ink); border:1px solid var(--panel-edge);
+  border-radius:8px; padding:8px 10px; font-size:0.9rem; }
+#profileSelect:disabled { opacity:0.5; }
+.mini-btn { background:transparent; color:var(--accent); border:1.5px solid var(--accent);
+  border-radius:8px; padding:7px 10px; font-size:0.82rem; font-weight:600; cursor:pointer; }
+.mini-btn:disabled { opacity:0.45; cursor:not-allowed; }
+.mini-btn.danger { color:#e06a6a; border-color:#e06a6a; padding:7px 9px; }
+.mini-btn.danger:not(:disabled):active { background:#e06a6a; color:#fff; }
+
+/* capture buttons */
+input[type="file"] { display:none; }
+.capture-row { display:flex; gap:10px; flex-wrap:wrap; }
+.capture-btn { flex:1 1 160px; display:flex; align-items:center; justify-content:center; gap:9px;
+  padding:14px; border-radius:12px; background:var(--accent); color:#fff;
+  font-size:0.98rem; font-weight:600; cursor:pointer; user-select:none; -webkit-user-select:none;
+  transition:background 0.15s ease, color 0.15s ease; }
+.capture-btn:active { background:var(--accent-press); }
+.capture-btn .cam { font-size:1.1rem; }
+.capture-btn.secondary { background:transparent; color:var(--accent); border:1.5px solid var(--accent); }
+.capture-btn.secondary:active { background:var(--accent); color:#fff; }
+
+.hint { color:var(--muted); font-size:0.85rem; line-height:1.45; margin:14px 2px 0; }
+.hint strong { color:var(--ink); }
+
+.canvas-wrap { width:100%; margin-top:14px; display:flex; justify-content:center; }
+#canvas { display:none; border-radius:12px; touch-action:pan-x pan-y pinch-zoom; background:#000; }
+
+.meta { display:none; font-family:var(--mono); font-size:0.74rem; color:var(--muted); text-align:center; margin:12px 0 2px; }
+
+.controls { display:none; align-items:center; flex-wrap:wrap; gap:12px; margin-top:14px; }
+.action-btn { padding:11px 16px; border-radius:10px; background:transparent; color:var(--accent);
+  border:1.5px solid var(--accent); font-size:0.95rem; font-weight:600; cursor:pointer;
+  transition:background 0.15s ease, color 0.15s ease; }
+.action-btn:not(:disabled):active { background:var(--accent); color:#fff; }
+.action-btn:disabled { opacity:0.45; cursor:not-allowed; }
+.cv-status { font-family:var(--mono); font-size:0.72rem; color:var(--muted); }
+
+.detect-status { display:none; font-size:0.82rem; line-height:1.45; color:var(--muted); margin:10px 2px 0; }
+
+.flat-section { display:none; margin-top:18px; }
+.caption { color:var(--muted); font-size:0.82rem; line-height:1.45; margin:0 2px 10px; }
+#flatCanvas { width:100%; max-width:360px; height:auto; display:block; margin:0 auto; border-radius:12px; background:#000; touch-action:pan-x pan-y pinch-zoom; cursor:pointer; }
+.save-row { display:flex; align-items:center; gap:12px; margin-top:14px; justify-content:center; }
+.save-status { font-family:var(--mono); font-size:0.74rem; color:var(--accent); }
+.saved-count { font-family:var(--mono); font-size:0.74rem; color:var(--muted); text-align:center; margin:8px 0 0; display:none; }
+
+/* sample panel: collect squares -> average */
+.sample-help { font-size:0.78rem; color:var(--muted); line-height:1.5; margin:10px 2px 8px; }
+.sample-list { display:flex; flex-direction:column; gap:6px; margin:6px 0; }
+.sample-item { display:flex; align-items:center; justify-content:space-between; gap:10px;
+  background:#0f1419; border:1px solid var(--panel-edge); border-radius:8px; padding:8px 12px; font-size:0.85rem; }
+.sample-item .x-btn { background:transparent; border:0; color:var(--muted); font-size:0.95rem; cursor:pointer; padding:2px 6px; line-height:1; }
+.sample-item .x-btn:hover { color:#ff6b6b; }
+.sample-summary { display:none; white-space:pre-line; font-family:var(--mono); font-size:0.82rem;
+  color:var(--ink); text-align:center; margin:10px 2px; line-height:1.6; }
+.sample-actions { display:flex; justify-content:center; flex-wrap:wrap; gap:8px; margin-top:6px; }
+
+/* unobtrusive debug log */
+.debug { max-width:520px; margin:14px auto 28px; color:var(--muted); }
+.debug > summary { cursor:pointer; font-size:0.75rem; opacity:0.55; list-style:none; }
+.debug > summary::-webkit-details-marker { display:none; }
+.debug pre { background:#0c1014; border:1px solid var(--panel-edge); border-radius:8px; padding:10px;
+  font-size:0.72rem; line-height:1.45; color:#9fb3c8; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+.debug-actions { display:flex; gap:8px; margin-top:6px; }
+
+/* Phase 2 — counting */
+.count-row { display:flex; align-items:center; gap:12px; margin-top:14px; justify-content:center; }
+.legend { display:flex; align-items:center; justify-content:center; gap:4px; flex-wrap:wrap;
+  color:var(--muted); font-size:0.74rem; line-height:1.5; margin:10px 2px 0; }
+.legend .dot { display:inline-block; width:10px; height:10px; border-radius:50%; vertical-align:middle; }
+.legend .dot-in  { background:rgba(60,220,130,0.95); }
+.legend .dot-out { background:rgba(255,170,60,0.95); }
+.legend .dot-dead { background:rgba(80,150,255,0.95); }
+.legend .dot-dismiss { background:transparent; border:1.5px dashed rgba(150,160,170,0.9); }
+
+/* counting tools: trypan toggle + dilution + readout */
+.count-tools { display:none; margin-top:14px; }
+.tools-row { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:10px 18px; }
+.tool-group { display:flex; align-items:center; gap:8px; }
+.tool-label { font-size:0.82rem; color:var(--muted); }
+.seg { display:inline-flex; border:1px solid var(--panel-edge); border-radius:8px; overflow:hidden; }
+.seg button { background:transparent; color:var(--muted); border:0; padding:7px 15px; font-size:0.85rem; font-weight:600; cursor:pointer; }
+.seg button.active { background:var(--accent); color:#fff; }
+.num-input { width:62px; background:#0f1419; color:var(--ink); border:1px solid var(--panel-edge);
+  border-radius:8px; padding:7px 8px; font-size:0.9rem; text-align:center; }
+.slider-group, .manual-row { justify-content:center; margin-top:12px; flex-wrap:wrap; }
+.slider { flex:1; min-width:120px; max-width:200px; accent-color:var(--accent); height:24px; }
+.slider-val { font-family:var(--mono); font-size:0.82rem; color:var(--ink); min-width:1.6em; text-align:right; }
+.manual-mode button { padding:7px 12px; }
+.stepper { display:inline-flex; align-items:center; gap:10px; }
+.step-btn { width:38px; height:38px; border-radius:10px; border:1.5px solid var(--accent);
+  background:transparent; color:var(--accent); font-size:1.3rem; line-height:1; cursor:pointer; }
+.step-btn:active { background:var(--accent); color:#fff; }
+.manual-val { font-family:var(--mono); font-size:0.85rem; color:var(--ink); min-width:5.2em; text-align:center; }
+.readout { display:none; font-family:var(--mono); font-size:0.8rem; color:var(--ink);
+  text-align:center; margin:12px 2px 0; line-height:1.55; }
+
+/* secondary (recount) button — quieter than the primary */
+.secondary-btn { opacity:0.85; }
+/* past-sessions history */
+.history { max-width:520px; margin:8px auto 0; }
+.history > summary { cursor:pointer; font-size:0.82rem; color:var(--accent); list-style:none; padding:6px 2px; }
+.history > summary::-webkit-details-marker { display:none; }
+.muted-line { font-size:0.78rem; color:var(--muted); text-align:center; margin:8px 0; }
+
+/* ===== additions: crop/zoom, loading screen, sensitivity, cell lines, training, units, calculator ===== */
+
+/* crop / zoom confirm-cancel row (replaces the old grid −/+ controls) */
+.controls { flex-wrap:wrap; }
+.crop-actions { justify-content:center; gap:10px 14px; margin-top:6px; }
+.crop-hint { font-size:0.8rem; color:var(--muted); width:100%; text-align:center; }
+
+/* the view-controls row (Reset / Show-hide) wraps on small screens */
+.count-row { flex-wrap:wrap; }
+
+/* small loading screen shown while a photo is detected / counted */
+.busy { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center;
+  background:rgba(8,12,16,0.45); -webkit-backdrop-filter:blur(1.5px); backdrop-filter:blur(1.5px); }
+.busy[hidden] { display:none; }
+.busy-card { display:flex; align-items:center; gap:13px; background:var(--panel);
+  border:1px solid var(--panel-edge); border-radius:12px; padding:14px 18px; box-shadow:0 12px 36px rgba(0,0,0,0.5); }
+.busy-card span { font-size:0.9rem; color:var(--ink); }
+.spinner { width:22px; height:22px; border:3px solid rgba(47,158,143,0.25); border-top-color:var(--accent);
+  border-radius:50%; animation:cc-spin 0.8s linear infinite; flex:none; }
+@keyframes cc-spin { to { transform:rotate(360deg); } }
+
+/* cell-line selector row (Phase 3) */
+.cellline-row { justify-content:center; margin-bottom:12px; flex-wrap:wrap; }
+.cellline-select { background:#0f1419; color:var(--ink); border:1px solid var(--panel-edge);
+  border-radius:8px; padding:7px 10px; font-size:0.88rem; max-width:190px; }
+
+/* training bar (Phase 3) */
+.train-bar { margin:12px 2px 0; padding:13px 14px; border:1px solid var(--accent);
+  border-radius:10px; background:rgba(47,158,143,0.08); }
+.train-hint { display:block; font-size:0.83rem; color:var(--ink); line-height:1.5; }
+.train-actions { display:flex; align-items:center; gap:12px; margin-top:11px; flex-wrap:wrap; }
+.train-count { font-family:var(--mono); font-size:0.82rem; color:var(--accent); margin-right:auto; }
+
+/* calculator recent / preset cell-count chips */
+.calc-recent { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:2px 0 6px; }
+.calc-recent-label { font-size:0.76rem; color:var(--muted); margin-right:2px; }
+.chip { background:#0f1419; color:var(--ink); border:1px solid var(--panel-edge);
+  border-radius:999px; padding:5px 11px; font-size:0.8rem; cursor:pointer; }
+.chip:active { background:var(--accent); color:#fff; border-color:var(--accent); }
+
+/* concentration unit toggle (cells/mL <-> cells/µL) */
+.unit-row { justify-content:center; margin:14px 0 2px; flex-wrap:wrap; }
+
+/* dilution / seeding calculator (collapsible) */
+.calc { max-width:520px; margin:14px auto 0; border:1px solid var(--panel-edge);
+  border-radius:10px; background:var(--panel); padding:0 13px; }
+.calc > summary { cursor:pointer; font-size:0.86rem; font-weight:600; color:var(--accent);
+  list-style:none; padding:11px 2px; }
+.calc > summary::-webkit-details-marker { display:none; }
+.calc-help { font-size:0.8rem; color:var(--muted); line-height:1.5; margin:0 0 10px; }
+.calc-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:9px 0; }
+.calc-row .tool-label { flex:none; }
+.num-input.wide { width:130px; text-align:left; }
+.calc-out { font-family:var(--mono); font-size:0.82rem; color:var(--ink); line-height:1.55;
+  white-space:pre-line; margin:11px 0 13px; padding:10px 12px; border-radius:8px;
+  background:rgba(47,158,143,0.08); border:1px solid var(--panel-edge); }
+
+/* count reliability hint (too few / too many cells in a square) */
+.count-hint { display:none; font-size:0.8rem; line-height:1.5; color:#f0b86c;
+  text-align:center; margin:9px 6px 0; }
+
+/* limiting-dilution sub-section inside the calculator */
+.calc-divider { height:1px; background:var(--panel-edge); margin:15px 0 12px; }
+.calc-sub { font-size:0.9rem; font-weight:600; color:var(--accent); margin:0 0 6px; }

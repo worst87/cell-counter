@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<!--
+  CELL COUNTER — app entry point. Structure only.
+  Phase 1 (boundary): photo (camera/gallery) -> auto-detect grid -> drag corners
+  (snap to grid crossings) -> grid +/- size -> Flatten & count. Phase 1.5: Profiles.
+  Phase 2: count + manual correct + Trypan + sensitivity. Phase 3: named cell lines.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cell Counter</title>
+  <link rel="preconnect" href="https://docs.opencv.org" crossorigin />
+  <link rel="dns-prefetch" href="https://docs.opencv.org" />
+  <link rel="stylesheet" href="css/style.css" />
+  <!--
+    OpenCV.js is NOT loaded here anymore. js/app.js injects it with a pinned version,
+    a per-source timeout, onerror fallback, and a Retry button — so a slow/blocked/failed
+    download (mobile, incognito, lab wi-fi) can't leave the app stuck on "Preparing tools…".
+    A pre-set Module hook is defined so classic emscripten builds signal readiness reliably.
+  -->
+  <script>
+    window.Module = window.Module || {};
+  </script>
+</head>
+
+<body>
+  <header class="topbar">
+    <h1>Cell Counter</h1>
+  </header>
+
+  <main class="card">
+    <!-- Profile (equipment setup) selector -->
+    <div class="profile-row">
+      <span class="profile-label">Profile</span>
+      <select id="profileSelect" disabled></select>
+      <button class="mini-btn" id="newProfileBtn" disabled>+ New</button>
+      <button class="mini-btn danger" id="deleteProfileBtn" disabled title="Delete this profile">🗑</button>
+    </div>
+
+    <!-- Two ways to load a photo: camera or gallery -->
+    <div class="capture-row">
+      <label class="capture-btn" for="cameraInput"><span class="cam">📷</span><span>Take photo</span></label>
+      <label class="capture-btn secondary" for="galleryInput"><span class="cam">🖼️</span><span>Choose from gallery</span></label>
+    </div>
+    <input id="cameraInput"  type="file" accept="image/*" capture="environment" />
+    <input id="galleryInput" type="file" accept="image/*" />
+
+    <p class="hint" id="hint">
+      Load a photo of the large counting square. The app auto-detects the grid — drag each
+      corner onto the square; corners <strong>snap to the grid crossings</strong>. If the square
+      looks small (photo taken from far), tap <strong>Crop / zoom</strong> to zoom into it first.
+      Then <strong>Flatten &amp; count</strong>.
+    </p>
+
+    <div class="canvas-wrap"><canvas id="canvas"></canvas></div>
+    <p class="meta" id="meta"></p>
+
+    <div class="controls" id="controls">
+      <button class="action-btn secondary-btn" id="cropBtn">Crop / zoom</button>
+      <button class="action-btn secondary-btn" id="resetBoxBtn" title="Bring the four corners back on-screen">Reset box</button>
+      <button class="action-btn" id="flattenBtn" disabled>Flatten &amp; count</button>
+      <span class="cv-status" id="cvStatus">Preparing tools…</span>
+      <button class="action-btn secondary-btn" id="cvRetryBtn" style="display:none" title="Try loading the vision tools again">↻ Retry</button>
+    </div>
+
+    <!-- crop mode: frame the big square, then confirm to zoom in -->
+    <div class="controls crop-actions" id="cropActions" style="display:none">
+      <span class="grid-size-label">Drag the box to frame the large square, then Confirm.</span>
+      <button class="action-btn" id="cropConfirm">Confirm crop</button>
+      <button class="mini-btn" id="cropCancel">Cancel</button>
+    </div>
+
+    <p class="detect-status" id="detectStatus"></p>
+
+    <div class="flat-section" id="flatSection">
+      <p class="caption">
+        Flattened square. The magenta box marks the true boundary; the area outside it is the
+        margin kept for analysis (boundary line + outer cells).
+      </p>
+      <canvas id="flatCanvas"></canvas>
+
+      <!-- Phase 3 — training bar (hidden unless training a cell line).
+           Tapping a candidate cycles its state the same way counting does
+           (live → dead → not-a-cell → back); tap empty space to add a missed cell. -->
+      <div class="train-bar" id="trainBar" style="display:none">
+        <span class="train-hint" id="trainHint">Tap each real cell — it turns green. Tap it again to mark it dead, again for not-a-cell, again to clear. ~15–25 cells is plenty.</span>
+        <div class="train-actions">
+          <span class="train-count" id="trainCount">0 cells · 0 dead · 0 debris</span>
+          <button class="action-btn" id="trainDone">Done</button>
+          <button class="mini-btn" id="trainCancel">Cancel</button>
+        </div>
+      </div>
+
+      <div class="count-row" id="viewRow">
+        <button class="action-btn secondary-btn" id="resetBtn">Reset to defaults</button>
+        <button class="action-btn secondary-btn" id="toggleOverlayBtn">Hide circles</button>
+        <button class="action-btn secondary-btn" id="saveImgBtn">⤓ Save image</button>
+        <span class="save-status" id="countStatus"></span>
+      </div>
+      <p class="legend" id="countLegend">
+        <span class="dot dot-in"></span> live
+        &nbsp;·&nbsp;
+        <span class="dot dot-dead"></span> dead
+        &nbsp;·&nbsp;
+        <span class="dot dot-out"></span> excluded (bottom/right)
+        &nbsp;·&nbsp;
+        <span class="dot dot-dismiss"></span> removed / hidden — tap to restore
+      </p>
+
+      <div class="count-tools" id="countTools">
+        <!-- Phase 3 — cell-line selector (Default = plain counting, no learning) -->
+        <div class="tool-group cellline-row" id="celllineRow">
+          <span class="tool-label">Cell line</span>
+          <select id="cellLineSelect" class="cellline-select"></select>
+          <button class="mini-btn" id="trainBtn">＋ Train new</button>
+          <button class="mini-btn" id="retrainBtn" style="display:none" title="Update this cell line — re-open the count and tap any mistakes to teach it">✎ Improve</button>
+          <button class="mini-btn danger" id="deleteCellLineBtn" style="display:none" title="Delete this cell line">🗑</button>
+        </div>
+
+        <div class="tools-row">
+          <div class="tool-group">
+            <span class="tool-label">Trypan blue</span>
+            <span class="seg">
+              <button id="trypanYes">Yes</button>
+              <button id="trypanNo">No</button>
+            </span>
+          </div>
+          <div class="tool-group">
+            <span class="tool-label">Dilution&nbsp;×</span>
+            <input id="dilutionInput" class="num-input" type="number" inputmode="decimal" min="0" step="1" value="2" />
+          </div>
+        </div>
+
+        <div class="tool-group slider-group" id="sliderGroup">
+          <span class="tool-label">Dead (blue) sensitivity</span>
+          <input id="blueSlider" class="slider" type="range" min="1" max="10" step="1" value="5" />
+          <span class="slider-val" id="blueLabel">5</span>
+        </div>
+
+        <div class="tool-group slider-group" id="sensGroup">
+          <span class="tool-label">Detection sensitivity</span>
+          <input id="sensSlider" class="slider" type="range" min="1" max="10" step="1" value="5" />
+          <span class="slider-val" id="sensLabel">5</span>
+        </div>
+
+        <div class="tool-group manual-row" id="manualRow">
+          <span class="tool-label">Adjust count</span>
+          <span class="seg manual-mode">
+            <button id="manualLiveBtn" class="active">live</button>
+            <button id="manualDeadBtn">dead</button>
+          </span>
+          <span class="stepper">
+            <button id="manualMinus" class="step-btn" aria-label="minus">−</button>
+            <span class="manual-val" id="manualLabel">+0 cells</span>
+            <button id="manualPlus" class="step-btn" aria-label="plus">+</button>
+          </span>
+        </div>
+
+        <div class="tool-group unit-row" id="unitRow">
+          <span class="tool-label">Show concentration in</span>
+          <span class="seg unit-seg">
+            <button id="concMlBtn" class="active">cells/mL</button>
+            <button id="concUlBtn">cells/µL</button>
+          </span>
+        </div>
+
+        <p class="readout" id="countReadout"></p>
+        <p class="count-hint" id="countHint"></p>
+      </div>
+
+      <div class="sample-panel" id="samplePanel">
+        <div class="save-row">
+          <button class="action-btn" id="saveBtn" disabled>Add square to session</button>
+          <span class="save-status" id="saveStatus"></span>
+        </div>
+        <p class="sample-help">A <strong>session</strong> = the squares you count this time (e.g. the 4 corners). Each new visit starts fresh. Add each counted square and the average + concentration show below.</p>
+        <div class="sample-list" id="sampleList"></div>
+        <p class="sample-summary" id="sampleSummary"></p>
+        <div class="sample-actions">
+          <button class="mini-btn" id="newSessionBtn">＋ New session</button>
+          <button class="mini-btn" id="undoSessionBtn" style="display:none">↶ Undo new session</button>
+          <button class="mini-btn" id="undoBtn" style="display:none">↶ Undo remove</button>
+          <button class="mini-btn" id="exportCsvBtn" disabled title="Download this session as a spreadsheet (CSV)">⤓ Export CSV</button>
+        </div>
+      </div>
+
+      <details class="calc" id="calcBox">
+        <summary>🧮 Dilution / seeding calculator</summary>
+        <p class="calc-help" id="calcBasis">Counts a square first to get a concentration.</p>
+        <div class="calc-row">
+          <span class="tool-label">Cells needed</span>
+          <input id="calcCells" class="num-input wide" type="text" inputmode="numeric" placeholder="e.g. 1000000" />
+        </div>
+        <div class="calc-recent" id="calcRecent"></div>
+        <div class="calc-row">
+          <span class="tool-label">Make up to (mL, optional)</span>
+          <input id="calcFinal" class="num-input" type="number" inputmode="decimal" min="0" step="0.1" placeholder="—" />
+        </div>
+        <p class="calc-out" id="calcOut"></p>
+
+        <div class="calc-divider"></div>
+        <p class="calc-sub">🧫 Limiting dilution (single-cell cloning)</p>
+        <p class="calc-help">Dilute the stock so each well gets about one cell — for cloning. Uses the measured stock concentration above.</p>
+        <div class="calc-row">
+          <span class="tool-label">Cells per well</span>
+          <input id="ldCells" class="num-input" type="number" inputmode="decimal" min="0" step="0.1" value="0.5" />
+        </div>
+        <div class="calc-row">
+          <span class="tool-label">Well volume (µL)</span>
+          <input id="ldVol" class="num-input" type="number" inputmode="decimal" min="0" step="10" value="100" />
+        </div>
+        <div class="calc-row">
+          <span class="tool-label">Number of wells</span>
+          <input id="ldWells" class="num-input" type="number" inputmode="numeric" min="1" step="1" value="96" />
+        </div>
+        <p class="calc-out" id="ldOut"></p>
+      </details>
+    </div>
+
+    <details class="history" id="historyBox">
+      <summary>Past sessions</summary>
+      <div class="sample-list" id="historyList"></div>
+    </details>
+  </main>
+
+  <details class="debug" id="debugBox">
+    <summary>Debug log</summary>
+    <pre id="debugLog"></pre>
+    <div class="debug-actions">
+      <button class="mini-btn" id="debugCopy">Copy</button>
+      <button class="mini-btn" id="debugClear">Clear</button>
+    </div>
+  </details>
+
+  <!-- small loading screen shown while a photo is detected / counted -->
+  <div class="busy" id="busy" hidden>
+    <div class="busy-card"><div class="spinner"></div><span id="busyMsg">Processing…</span></div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
