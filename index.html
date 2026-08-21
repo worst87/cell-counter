@@ -8,8 +8,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Cell Counter</title>
+  <meta name="theme-color" content="#0f1419" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="manifest.webmanifest" />
   <link rel="preconnect" href="https://docs.opencv.org" crossorigin />
   <link rel="dns-prefetch" href="https://docs.opencv.org" />
   <link rel="stylesheet" href="css/style.css" />
@@ -48,7 +53,8 @@
 
     <p class="hint" id="hint">
       Load a photo of the large counting square. The app auto-detects the grid — drag each
-      corner onto the square; corners <strong>snap to the grid crossings</strong>. If the square
+      corner onto the square; corners <strong>snap to the grid crossings</strong>. If it picks the
+      wrong square, tap <strong>Tap 4 corners</strong> and tap them yourself. If the square
       looks small (photo taken from far), tap <strong>Crop / zoom</strong> to zoom into it first.
       Then <strong>Flatten &amp; count</strong>.
     </p>
@@ -57,11 +63,20 @@
     <p class="meta" id="meta"></p>
 
     <div class="controls" id="controls">
+      <button class="action-btn" id="flattenBtn" disabled>Flatten &amp; count</button>
+      <button class="action-btn secondary-btn" id="tapCornersBtn" title="Tap the four corners of the large square yourself">⌖ Tap 4 corners</button>
+      <button class="action-btn secondary-btn" id="lastBoxBtn" style="display:none" title="Reuse the box from your last counted photo — handy when every photo is framed the same way">↺ Same box as last time</button>
       <button class="action-btn secondary-btn" id="cropBtn">Crop / zoom</button>
       <button class="action-btn secondary-btn" id="resetBoxBtn" title="Bring the four corners back on-screen">Reset box</button>
-      <button class="action-btn" id="flattenBtn" disabled>Flatten &amp; count</button>
       <span class="cv-status" id="cvStatus">Preparing tools…</span>
       <button class="action-btn secondary-btn" id="cvRetryBtn" style="display:none" title="Try loading the vision tools again">↻ Retry</button>
+    </div>
+
+    <!-- tap-4-corners mode: tap TL, TR, BR, BL in turn (each tap snaps to a grid crossing) -->
+    <div class="controls tap-actions" id="tapActions" style="display:none">
+      <span class="tap-prompt" id="tapPrompt">Tap the <strong>top-left</strong> corner of the large square.</span>
+      <button class="mini-btn" id="tapUndo">↶ Undo tap</button>
+      <button class="mini-btn" id="tapCancel">Cancel</button>
     </div>
 
     <!-- crop mode: frame the big square, then confirm to zoom in -->
@@ -71,7 +86,7 @@
       <button class="mini-btn" id="cropCancel">Cancel</button>
     </div>
 
-    <p class="detect-status" id="detectStatus"></p>
+    <p class="detect-status" id="detectStatus"><span class="conf-badge" id="gridConf" style="display:none"></span><span id="detectText"></span></p>
 
     <div class="flat-section" id="flatSection">
       <p class="caption">
@@ -170,18 +185,31 @@
       </div>
 
       <div class="sample-panel" id="samplePanel">
+        <h3 class="panel-title">Session — average several squares</h3>
+        <p class="sample-help">A <strong>session</strong> = the squares you count for one sample (usually the 4 corner squares). Count a square, press <strong>Add this square</strong>, then <strong>Count another square</strong>. The average and concentration update below.</p>
+
         <div class="save-row">
-          <button class="action-btn" id="saveBtn" disabled>Add square to session</button>
+          <button class="action-btn primary-btn" id="saveBtn" disabled>＋ Add this square to the session</button>
           <span class="save-status" id="saveStatus"></span>
         </div>
-        <p class="sample-help">A <strong>session</strong> = the squares you count this time (e.g. the 4 corners). Each new visit starts fresh. Add each counted square and the average + concentration show below.</p>
+        <button class="action-btn primary-btn wide-btn" id="nextSquareBtn" style="display:none">📷 Count another square</button>
+
         <div class="sample-list" id="sampleList"></div>
         <p class="sample-summary" id="sampleSummary"></p>
+
+        <!-- fix a dilution factor chosen by mistake, for every square at once -->
+        <div class="session-dil-row" id="sessionDilRow" style="display:none">
+          <span class="tool-label">Wrong dilution? Set&nbsp;× on every square:</span>
+          <input id="sessionDilInput" class="num-input" type="number" inputmode="decimal" min="0" step="1" />
+          <button class="mini-btn" id="sessionDilApply">Apply to all</button>
+        </div>
+
         <div class="sample-actions">
-          <button class="mini-btn" id="newSessionBtn">＋ New session</button>
+          <button class="mini-btn" id="newSessionBtn" title="Finish this sample and start a fresh list (this one is kept under Past sessions)">＋ New session</button>
           <button class="mini-btn" id="undoSessionBtn" style="display:none">↶ Undo new session</button>
           <button class="mini-btn" id="undoBtn" style="display:none">↶ Undo remove</button>
           <button class="mini-btn" id="exportCsvBtn" disabled title="Download this session as a spreadsheet (CSV)">⤓ Export CSV</button>
+          <button class="mini-btn danger" id="clearSessionBtn" style="display:none" title="Delete every square in this session">🗑 Clear squares</button>
         </div>
       </div>
 
