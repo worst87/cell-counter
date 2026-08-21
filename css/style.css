@@ -189,3 +189,47 @@ input[type="file"] { display:none; }
 /* limiting-dilution sub-section inside the calculator */
 .calc-divider { height:1px; background:var(--panel-edge); margin:15px 0 12px; }
 .calc-sub { font-size:0.9rem; font-weight:600; color:var(--accent); margin:0 0 6px; }
+
+/* ===== v8: grid confidence, tap-4-corners, clearer session panel, square editing ===== */
+
+/* filled "primary" button — the one action we want the eye to land on */
+.primary-btn { background:var(--accent); color:#fff; border-color:var(--accent); }
+.primary-btn:not(:disabled):active { background:var(--accent-press); border-color:var(--accent-press); color:#fff; }
+.primary-btn:disabled { background:transparent; color:var(--accent); }
+.wide-btn { display:block; width:100%; margin:10px 0 2px; }
+
+/* how sure the auto-detect is about the square it found */
+.conf-badge { display:inline-block; font-family:var(--mono); font-size:0.68rem; font-weight:700;
+  letter-spacing:0.4px; border-radius:999px; padding:2px 9px; margin-right:8px; vertical-align:1px; }
+.conf-high { background:rgba(60,220,130,0.16); color:#5fe0a0; border:1px solid rgba(60,220,130,0.45); }
+.conf-med  { background:rgba(240,184,108,0.14); color:#f0b86c; border:1px solid rgba(240,184,108,0.45); }
+.conf-low  { background:rgba(224,106,106,0.14); color:#e88b8b; border:1px solid rgba(224,106,106,0.45); }
+
+/* tap-the-four-corners mode */
+.tap-actions { justify-content:center; gap:10px 14px; margin-top:8px; }
+.tap-prompt { flex:1 1 100%; text-align:center; font-size:0.86rem; color:var(--ink); line-height:1.5; }
+.tap-prompt strong { color:var(--accent); }
+
+/* session panel */
+.panel-title { font-size:0.95rem; font-weight:600; margin:20px 2px 4px; padding-top:14px;
+  border-top:1px solid var(--panel-edge); }
+.session-dil-row { display:flex; align-items:center; justify-content:center; flex-wrap:wrap;
+  gap:8px 10px; margin:10px 2px; padding:10px 12px; border:1px dashed var(--panel-edge); border-radius:8px; }
+
+/* Bigger targets for thumbs. The segmented toggles and preset chips were 27–30 px tall — reachable
+   with a mouse, fiddly on a phone held in one hand over a microscope. */
+.seg button { padding:10px 16px; min-height:40px; }
+.manual-mode button { padding:10px 14px; }
+.chip { padding:8px 13px; min-height:34px; }
+
+/* a saved square row + its inline editor */
+.sample-item { flex-wrap:wrap; }
+.sample-item .row-actions { display:flex; align-items:center; gap:2px; }
+.sample-item .x-btn { min-width:32px; min-height:32px; }
+.sample-edit { flex:1 1 100%; display:flex; align-items:center; justify-content:flex-start;
+  flex-wrap:wrap; gap:8px 12px; margin-top:9px; padding-top:9px; border-top:1px solid var(--panel-edge); }
+.sample-edit .field { display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--muted); }
+.sample-edit .num-input { width:64px; padding:6px 6px; }
+.sample-edit .edit-actions { display:flex; gap:8px; margin-left:auto; }
+.sample-edit label.check { display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--muted); }
+.sample-edit input[type="checkbox"] { width:17px; height:17px; accent-color:var(--accent); }
