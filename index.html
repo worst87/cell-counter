@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f6f0">
+  <title>Cell Counter · Hemocytometer workspace</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css?v=3">
+</head>
+<body data-stage="photo">
+  <header class="mast"><div class="bar">
+    <a class="brand" href="#workspace" aria-label="Cell Counter workspace"><i class="brand-mark" aria-hidden="true"></i>Cell Counter</a>
+    <nav aria-label="Workspace navigation"><a href="#session">Session</a></nav>
+  </div></header>
+  <main id="workspace">
+    <ol class="steps" aria-label="Counting progress">
+      <li aria-current="step">Photo</li><li>Boundary</li><li>Count</li>
+    </ol>
+    <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden>
+    <input id="galleryInput" type="file" accept="image/*" hidden>
+    <section class="intro" aria-labelledby="introTitle">
+      <div class="intro-copy"><h1 id="introTitle" tabindex="-1">Count a square<span>.</span></h1>
+        <p class="lead">Take a photo of one large hemocytometer square. Keep all four corners in view.</p>
+        <div class="capture-row"><button class="primary" data-pick="camera"><i class="camera-icon" aria-hidden="true"></i>Take photo</button>
+          <button data-pick="gallery"><i class="photo-icon" aria-hidden="true"></i>Choose photo</button></div>
+        <p class="local-note">Photos are processed on this device.</p>
+      </div>
+      <figure class="reference"><div class="diagram"><canvas id="guide" width="800" height="410" aria-label="Diagram of a large counting square enclosing four rows and four columns"></canvas></div>
+        <figcaption><strong>Counting square</strong><span>4 × 4 subdivisions</span></figcaption>
+      </figure>
+    </section>
+    <fieldset class="stain-panel" id="stainPanel" aria-label="Staining and detection" disabled>
+        <div class="tools-row">
+          <div class="tool-group">
+            <span class="tool-label">Trypan blue</span>
+            <span class="seg" role="group" aria-label="Trypan blue added">
+              <button id="trypanYes" aria-pressed="true" class="active">Yes</button>
+              <button id="trypanNo" aria-pressed="false">No</button>
+            </span>
+          </div>
+          <div class="tool-group">
+            <label class="tool-label" for="dilutionInput">Dilution&nbsp;×</label>
+            <input id="dilutionInput" class="num-input" type="number" inputmode="decimal" min="0" step="1" value="2" />
+          </div>
+        </div>
+
+      <div class="sensitivity-controls">
+        <div class="tool-group slider-group" id="sensGroup">
+          <label class="tool-label" for="sensSlider">Detection sensitivity</label>
+          <input id="sensSlider" aria-describedby="sensitivityNote" class="slider" type="range" min="1" max="10" step="1" value="5" />
+          <span class="slider-val" id="sensLabel">5</span>
+        </div>
+        <div class="tool-group slider-group" id="sliderGroup">
+          <label class="tool-label" for="blueSlider">Blue stain sensitivity</label>
+          <input id="blueSlider" class="slider" type="range" min="1" max="10" step="1" value="5" />
+          <span class="slider-val" id="blueLabel">5</span>
+        </div>
+        <p id="sensitivityNote" class="caption">Changing detection sensitivity recounts the square and clears manual edits.</p>
+      </div>
+    </fieldset>
+    <p id="photoError" role="alert" hidden></p>
+    <section id="boundary" class="stage-panel" hidden aria-labelledby="boundaryTitle">
+      <header class="stage-head"><h1 id="boundaryTitle" tabindex="-1">Check the boundary</h1><span class="meta" id="meta"></span></header>
+      <p id="detectStatus" class="prompt" aria-live="polite"></p>
+      <div class="canvas-wrap"><canvas id="canvas" aria-label="Photo with editable counting boundary"></canvas></div>
+      <div class="controls" id="controls">
+        <button class="primary" id="flattenBtn" disabled>Count this square</button>
+        <button id="resetBoxBtn">Mark four corners</button><button id="cropBtn">Crop photo</button><button id="fullPhotoBtn" hidden>Full photo</button>
+        <span id="cvStatus" role="status"></span><button id="cvRetryBtn" style="display:none">Retry loading</button>
+      </div>
+      <div class="controls" id="cropActions" style="display:none"><span>Drag the frame around one large square.</span>
+        <button class="primary" id="cropConfirm">Use crop</button><button id="cropCancel">Cancel</button></div>
+    </section>
+    <section class="flat-section stage-panel" id="flatSection" aria-labelledby="reviewTitle">
+      <header class="stage-head"><h1 id="reviewTitle" tabindex="-1">Review the count</h1><button id="editBoundaryBtn">Edit boundary</button></header>
+      <div class="review-grid"><div>
+        <canvas id="flatCanvas" aria-label="Counted cells. Tap a ring to correct a cell or tap a missed cell to add it."></canvas>
+        <p class="legend" id="countLegend"><span><i class="dot dot-in"></i><span id="includedLabel">Live</span></span><span id="deadLegend"><i class="dot dot-dead"></i>Dead</span><span><i class="dot dot-out"></i>Excluded</span><span><i class="dot dot-dismiss"></i>Removed</span></p>
+        <p class="caption">The pink line is the counting boundary. Cells touching the bottom or right edge are excluded.</p>
+      </div><div class="review-tools">
+        <div class="result-stat"><span>Cells in square</span><strong id="totalCells">0</strong></div>
+        <p id="countStatus" class="caption" role="status"></p>
+        <div class="actions" id="viewRow"><button id="toggleOverlayBtn">Hide circles</button><button id="saveImgBtn">Save image</button></div>
+        <div class="count-tools" id="countTools">
+        <details class="fold" id="countSettings"><summary>Count settings</summary><div class="fold-body">
+        <button id="resetBtn" class="reset-count">Reset count settings</button>
+        <div class="tool-group"><label class="tool-label" for="cellContrast">Cell appearance</label>
+          <select id="cellContrast"><option value="auto">Automatic</option><option value="bright">Bright on dark</option><option value="dark">Dark on light</option></select>
+        </div>
+        <p class="caption">Changing cell appearance recounts the square and clears manual edits.</p>
+
+        <div class="tool-group manual-row" id="manualRow">
+          <span class="tool-label">Adjust count</span>
+          <span class="seg manual-mode">
+            <button id="manualLiveBtn" class="active">live</button>
+            <button id="manualDeadBtn">dead</button>
+          </span>
+          <span class="stepper">
+            <button id="manualMinus" class="step-btn" aria-label="minus">−</button>
+            <span class="manual-val" id="manualLabel">+0 cells</span>
+            <button id="manualPlus" class="step-btn" aria-label="plus">+</button>
+          </span>
+        </div>
+
+        <div class="tool-group unit-row" id="unitRow">
+          <span class="tool-label">Show concentration in</span>
+          <span class="seg unit-seg">
+            <button id="concMlBtn" class="active">cells/mL</button>
+            <button id="concUlBtn">cells/µL</button>
+          </span>
+        </div>
+
+        </div></details><p class="readout" id="countReadout"></p>
+        <p class="count-hint" id="countHint"></p>
+      </div>
+
+      
+        <div class="save-row"><button class="primary" id="saveBtn" disabled>Add square to session</button><span id="saveStatus" role="status"></span></div>
+      </div></div>
+      <details class="calc" id="calcBox">
+        <summary>Dilution calculator</summary>
+        <p class="calc-help" id="calcBasis">Counts a square first to get a concentration.</p>
+        <div class="calc-row">
+          <label class="tool-label" for="calcCells">Cells needed</label>
+          <input id="calcCells" class="num-input wide" type="text" inputmode="numeric" placeholder="Enter a cell count" />
+        </div>
+        <div class="quick-values"><span class="tool-label" id="quickLabel">Quick values</span><div class="calc-recent" id="calcRecent" role="group" aria-labelledby="quickLabel"></div></div>
+        <div class="calc-row">
+          <label class="tool-label" for="calcFinal">Make up to (mL, optional)</label>
+          <input id="calcFinal" class="num-input" type="number" inputmode="decimal" min="0" step="0.1" placeholder="—" />
+        </div>
+        <p class="calc-out" id="calcOut"></p>
+      </details>
+    
+    </section>
+    <details class="replace fold" id="changePhoto" hidden><summary>Change photo</summary><div class="capture-row"><button data-pick="camera">Take photo</button><button data-pick="gallery">Choose photo</button></div></details>
+    <section id="session" class="session-area" data-empty="true"><header class="section-head"><h2>Current session</h2><span id="squareTally">0 squares</span></header>
+      <div class="sample-list" id="sampleList"></div><p class="sample-summary" id="sampleSummary">Saved squares and their average appear here.</p>
+      <div class="sample-actions">
+        <form id="newSessionForm" method="get" autocomplete="off">
+          <button id="newSessionBtn" type="submit" name="new-session" value="1">New session</button>
+        </form><button id="undoSessionBtn" style="display:none">Undo new session</button>
+        <button id="undoBtn" style="display:none">Undo remove</button><button id="exportCsvBtn" disabled>Export CSV</button></div>
+      <details class="fold" id="historyBox"><summary>Past sessions</summary><div id="historyList" class="sample-list"></div></details>
+    </section>
+    <details class="fold debug" id="debugBox"><summary>Debug log</summary><pre id="debugLog"></pre><div class="actions"><button id="debugCopy">Copy log</button><button id="debugClear">Clear</button></div></details>
+  </main>
+  <div class="busy" id="busy" role="status" hidden><div><i class="spinner"></i><span id="busyMsg">Processing…</span></div></div>
+  <script src="js/grid.js"></script><script src="js/app.js?v=4"></script>
+</body></html>
