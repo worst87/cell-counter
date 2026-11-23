@@ -1,16 +1,4 @@
-/* ===========================================================================
-   Cell Counter — app logic   (v7: boundary-clamp + reset, reliability hint,
-   per-profile Trypan/dilution memory, limiting-dilution calc, faster CV)
-   Phase 1 (boundary) + 1.5 (storage/profiles) + 2 (count + correct + Trypan)
-   + Phase 3 (named per-profile CELL-LINE classifiers + Training mode)
-     - photo (camera/gallery) -> canvas + draggable 4-corner box + magnifier
-     - SNAP to real grid-line crossings; GRID +/- to resize the box (re-snaps)
-     - FLATTEN with a margin; COUNT cells; adjustable detection SENSITIVITY
-     - Trypan live/dead (Yes/No also sets dilution); +/- manual nudge (signed)
-     - PROFILES + sessions (IndexedDB, on the phone) + Past sessions
-     - CELL LINES: train a named classifier by tapping real cells; it then
-       auto-hides look-alike debris. Default = plain counting, NO learning.
-   =========================================================================== */
+/* Cell Counter: photo capture, boundary review, counting and on-device sessions. */
 
 // --- Page elements ----------------------------------------------------------
 const cameraInput  = document.getElementById('cameraInput');
@@ -29,9 +17,6 @@ const cvRetryBtn   = document.getElementById('cvRetryBtn');
 const detectStatus = document.getElementById('detectStatus');
 const flatSection  = document.getElementById('flatSection');
 const flatCanvas   = document.getElementById('flatCanvas');
-const profileSelect= document.getElementById('profileSelect');
-const newProfileBtn= document.getElementById('newProfileBtn');
-const deleteProfileBtn = document.getElementById('deleteProfileBtn');
 const saveBtn      = document.getElementById('saveBtn');
 const saveStatus   = document.getElementById('saveStatus');
 const sampleList   = document.getElementById('sampleList');
@@ -51,7 +36,6 @@ const blueSlider   = document.getElementById('blueSlider');
 const blueLabel    = document.getElementById('blueLabel');
 const sensSlider   = document.getElementById('sensSlider');
 const sensLabel    = document.getElementById('sensLabel');
-const sensGroup    = document.getElementById('sensGroup');
 const manualMinus  = document.getElementById('manualMinus');
 const manualPlus   = document.getElementById('manualPlus');
 const manualLiveBtn= document.getElementById('manualLiveBtn');
@@ -64,18 +48,6 @@ const undoBtn      = document.getElementById('undoBtn');
 const historyList  = document.getElementById('historyList');
 const busy         = document.getElementById('busy');
 const busyMsg      = document.getElementById('busyMsg');
-// Phase 3 — cell-line UI
-const celllineRow  = document.getElementById('celllineRow');
-const cellLineSelect = document.getElementById('cellLineSelect');
-const trainBtn     = document.getElementById('trainBtn');
-const retrainBtn   = document.getElementById('retrainBtn');
-const deleteCellLineBtn = document.getElementById('deleteCellLineBtn');
-const trainBar     = document.getElementById('trainBar');
-const trainHint    = document.getElementById('trainHint');
-const trainCount   = document.getElementById('trainCount');
-const trainDone    = document.getElementById('trainDone');
-const trainCancel  = document.getElementById('trainCancel');
-// (the cells/dead/debris marking buttons were removed — tapping now cycles state like counting)
 // new (export + extra undo + save image)
 const exportCsvBtn = document.getElementById('exportCsvBtn');
 const undoSessionBtn = document.getElementById('undoSessionBtn');
@@ -171,6 +143,10 @@ function frameBoundary() {
 fullPhotoBtn.addEventListener('click',()=>{frameSquare=!frameSquare;frameBoundary()});
 function setStage(stage) {
   document.body.dataset.stage=stage;
+  const stainPanel = document.getElementById('stainPanel');
+  const anchor = stage === 'count' ? document.getElementById('reviewTitle').parentElement
+    : stage === 'boundary' ? document.getElementById('boundaryTitle').parentElement : document.querySelector('.intro');
+  anchor.after(stainPanel);
   document.querySelector('.intro').hidden=stage!=='photo';
   boundaryPanel.hidden=stage!=='boundary';
   flatSection.style.display=stage==='count'?'block':'none';
@@ -190,7 +166,6 @@ function reportPhotoError(message) {
 document.querySelectorAll('[data-pick]').forEach(button=>button.addEventListener('click',()=>{
   (button.dataset.pick==='camera'?cameraInput:galleryInput).click();
 }));
-document.querySelector('a[href="#equipment"]').addEventListener('click',()=>{document.getElementById('equipment').open=true});
 function handleFile(event) {
   const input=event.target, file=input.files[0];
   if (!file) return;
@@ -228,13 +203,58 @@ function setCanvasSize(w, h) {
   canvas.width = w; canvas.height = h;
   canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
 }
+function clearReview() {
+  lastFlatClean = null;
+  flatCleanData = null;
+  freeSegCache();
+  cells = [];
+  overlayVisible = true;
+  hasCount = false; savedThisCount = false;
+  manualLive = 0; manualDead = 0; manualMode = 'live';
+  showCountTools(false);
+  updateSaveButton();
+  toggleOverlayBtn.textContent = 'Hide circles';
+  countStatus.textContent = '';
+  saveStatus.textContent = '';
+}
+function resetPhoto() {
+  if (currentURL) URL.revokeObjectURL(currentURL);
+  currentURL = null;
+  img = null;
+  corners = []; marked = []; snapTargetsImg = [];
+  activeCorner = -1; marking = false; manualBoundary = false; snappedNow = false;
+  cropMode = false; cropRect = null; cropActive = null; frameSquare = false;
+  _tapStart = null; _activePtrs.clear();
+  clearTimeout(sensTimer);
+  cameraInput.value = galleryInput.value = '';
+  canvas.width = canvas.height = flatCanvas.width = flatCanvas.height = 1;
+  cropActions.style.display = 'none';
+  flattenBtn.disabled = true;
+  meta.textContent = detectStatus.textContent = '';
+  clearReview();
+  countReadout.textContent = countHint.textContent = '';
+  document.getElementById('totalCells').textContent = '0';
+  document.getElementById('countSettings').open = false;
+  document.getElementById('cellContrast').value = 'auto';
+  calcBox.open = false;
+  calcCells.value = calcFinal.value = '';
+  for (const field of [ldCells, ldVol, ldWells]) field.value = field.defaultValue;
+  reportPhotoError('');
+  hideBusy();
+  setStage('photo');
+  document.getElementById('introTitle').focus({preventScroll:true});
+  window.scrollTo(0,0);
+}
+function laterForPhoto(callback, delay = 30) {
+  const photo = img;
+  setTimeout(() => { if (photo && img === photo) callback(); }, delay);
+}
 function loadPhoto(image) {
   img = image;
   setStage('boundary');
   marking=false; marked=[]; manualBoundary=false; activeCorner=-1;
   cropMode=false; cropActive=null; cropActions.style.display='none';
   snapTargetsImg=[]; resetBoxBtn.textContent='Mark four corners';
-  if (trainingMode) cancelTraining();
   flattenBtn.disabled=true;
   const { w, h } = computeFitSize();
   setCanvasSize(w, h);
@@ -245,21 +265,13 @@ function loadPhoto(image) {
   meta.style.display = 'block';
   controls.style.display = 'flex';
   flatSection.style.display = 'none';
-  lastFlatClean = null;
-  flatCleanData = null;
-  freeSegCache();                 // new photo -> drop the cached preprocessing
-  cells = [];
-  overlayVisible = true;
-  hasCount = false; savedThisCount = false;
-  manualLive = 0; manualDead = 0; manualMode = 'live';
-  showCountTools(false);
-  updateSaveButton();
+  clearReview();
   meta.textContent = `photo ${img.naturalWidth}\u00D7${img.naturalHeight}px`;
 
   draw();
   if (cvReady) {
     showBusy('Finding the grid…');
-    setTimeout(() => { try { analyzeAndDetect(); } finally { hideBusy(); } }, 30);
+    laterForPhoto(() => { try { analyzeAndDetect(); } finally { hideBusy(); } });
   } else {
     setDetectStatus('Loading the grid detector. You can mark the four corners now.');
   }
@@ -515,14 +527,15 @@ function confirmCrop() {
     oc.getContext('2d').drawImage(img, ix, iy, iw, ih, 0, 0, oc.width, oc.height);
     const url = oc.toDataURL('image/jpeg', 0.92);
     const im = new Image();
-    im.onload = () => { leaveCrop(); loadPhoto(im); };      // loadPhoto re-fits + re-detects the grid on the zoomed crop
-    im.onerror = () => { cancelCrop(); setDetectStatus('Could not crop this photo. Try a smaller frame.'); };
+    const original = img;
+    im.onload = () => { if (img === original) { leaveCrop(); hideBusy(); loadPhoto(im); } };      // loadPhoto re-fits + re-detects the grid on the zoomed crop
+    im.onerror = () => { if (img !== original) return; cancelCrop(); setDetectStatus('Could not crop this photo. Try a smaller frame.'); };
     im.src = url;
   } catch (e) { dlog('crop FAILED: ' + e.message); cancelCrop(); }
 }
 if (cropBtn) cropBtn.addEventListener('click', enterCrop);
 if (resetBoxBtn) resetBoxBtn.addEventListener('click', resetBox);
-if (cropConfirm) cropConfirm.addEventListener('click', () => { showBusy('Zooming in…'); setTimeout(confirmCrop, 30); });
+if (cropConfirm) cropConfirm.addEventListener('click', () => { showBusy('Zooming in…'); laterForPhoto(confirmCrop); });
 if (cropCancel) cropCancel.addEventListener('click', cancelCrop);
 
 /* ===========================================================================
@@ -579,7 +592,7 @@ function loadOpenCv() {
     if (typeof cvRetryBtn !== 'undefined' && cvRetryBtn) cvRetryBtn.style.display = 'none';
     updateBoundaryAction();
     if (typeof dlog === 'function') dlog('OpenCV ready (' + (window.__cvSrc || '?') + ').');
-    if (img && !cropMode) { showBusy('Finding the grid…'); setTimeout(() => { try { analyzeAndDetect(); } finally { hideBusy(); } }, 30); }
+    if (img && !cropMode) { showBusy('Finding the grid…'); laterForPhoto(() => { try { analyzeAndDetect(); } finally { hideBusy(); } }); }
   }
 
   // Resolve whatever shape this build hands us into a ready cv.Mat module.
@@ -752,7 +765,7 @@ document.getElementById('editBoundaryBtn').addEventListener('click',()=>{
 flattenBtn.addEventListener('click', () => {
   if (!cvReady || !img || !updateBoundaryAction()) return;
   showBusy('Straightening the square…');
-  setTimeout(doFlatten, 30);
+  laterForPhoto(doFlatten);
 });
 function doFlatten() {
   let src, dst, srcTri, dstTri, Mtx;
@@ -816,12 +829,11 @@ const RING_GAP = 6;                   // ring sits this far OUTSIDE the cell edg
 const ROW_BAND = 38;                  // reading-order row height for numbering
 const TAP_TOL = 7;                   // finger tolerance (screen px) beyond a ring
 const ADD_ROI = 46;                   // window (px) searched when you tap to add a cell
-const ONECLASS_T = 3.0;               // cell-line one-class outlier cutoff (normalized dist)
 
 let trypanOn = true;                  // DEFAULT: Trypan blue added (user can press No)
 let dilution = 2;                     // dilution factor (0/1 = none; 2 = diluted half)
-let deadLevel = 5;                    // dead (blue) sensitivity 1..10 (higher = more dead); saved per profile
-let sensitivity = 5;                  // detection sensitivity 1..10; saved per profile
+let deadLevel = 5;                    // dead (blue) sensitivity 1..10 (higher = more dead); saved on this device
+let sensitivity = 5;                  // detection sensitivity 1..10; saved on this device
 let bgBlue = 0, bgSpread = 8;         // background blueness reference (set each count)
 
 // manual count nudge (for cells the detector misses or over-counts; CAN go negative)
@@ -830,8 +842,7 @@ let manualMode = 'live';
 
 function setCountStatus(t) { countStatus.textContent = t; countStatus.style.display = 'block'; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-function grayAt(d, W, x, y) { const i = (y * W + x) * 4; return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; }
-function isCounted(c) { return c.state === 'in' && !c.dismissed && !c.autoHidden; }
+function isCounted(c) { return c.state === 'in' && !c.dismissed; }
 
 // dead detection RELATIVE to background: a cell is dead when its blueness exceeds the field
 // by margin = k(level)·spread. Level is now the DEAD SENSITIVITY (req 5): low level = strict
@@ -851,19 +862,8 @@ function computeBackgroundBlueness() {
   bgBlue = med; bgSpread = Math.max(6, mad * 1.4826);   // robust spread (MAD->σ), floored
 }
 function recomputeDead() {
-  // If the active cell line has enough trained dead/live examples, classify dead by the learned
-  // model (req 7); otherwise fall back to the relative blueness slider. Guarded so it never breaks.
-  let useModel = false;
-  try { useModel = (typeof deadModelReady === 'function') && deadModelReady(); } catch (_) { useModel = false; }
   const margin = deadMarginK() * bgSpread;
-  cells.forEach((c) => {
-    if (useModel) {
-      try { c.deadBase = predictDeadTrained(c); }
-      catch (_) { c.deadBase = (c.blueness - bgBlue) > margin; }
-    } else {
-      c.deadBase = (c.blueness - bgBlue) > margin;
-    }
-  });
+  cells.forEach(c => { c.deadBase = c.blueness - bgBlue > margin; });
 }
 
 // sensitivity -> effective detection parameters (monotonic; default = the constants above)
@@ -891,24 +891,21 @@ function classifyCell(cx, cy, r, O, M) {
   return 'drop';
 }
 
-// small per-cell "fingerprint" (the cell-line classifier learns from these).
-function featuresAt(cx, cy, r) {
-  const data = flatCleanData.data, W = FLAT_OUT, r2 = r * r;
-  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
-  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(W - 1, Math.ceil(cy + r));
-  let n = 0, sG = 0, sG2 = 0, sR = 0, sGr = 0, sB = 0;
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const dx = x - cx, dy = y - cy; if (dx * dx + dy * dy > r2) continue;
-      const i = (y * W + x) * 4, R = data[i], G = data[i + 1], B = data[i + 2];
-      const g = 0.299 * R + 0.587 * G + 0.114 * B;
-      sG += g; sG2 += g * g; sR += R; sGr += G; sB += B; n++;
+// Average blue excess inside the cell relative to red and green.
+function bluenessAt(cx, cy, r) {
+  const data = flatCleanData.data, width = FLAT_OUT;
+  const left = Math.max(0, Math.floor(cx-r)), right = Math.min(width-1, Math.ceil(cx+r));
+  const top = Math.max(0, Math.floor(cy-r)), bottom = Math.min(width-1, Math.ceil(cy+r));
+  let sum = 0, pixels = 0;
+  for (let y = top; y <= bottom; y++) {
+    for (let x = left; x <= right; x++) {
+      if ((x-cx)**2 + (y-cy)**2 > r*r) continue;
+      const i = (y*width+x)*4;
+      sum += data[i+2] - (data[i]+data[i+1])/2;
+      pixels++;
     }
   }
-  if (!n) return { meanI: 0, varI: 0, blueness: 0 };
-  const meanI = sG / n, varI = Math.max(0, sG2 / n - meanI * meanI);
-  const blueness = (sB / n) - ((sR / n) + (sGr / n)) / 2;
-  return { meanI: Math.round(meanI), varI: Math.round(varI), blueness: Math.round(blueness) };
+  return pixels ? Math.round(sum/pixels) : 0;
 }
 
 /* ---- numbering: counted cells, reading order top-left -> bottom-right ---- */
@@ -928,7 +925,6 @@ function renderFlat() {
   const fctx = flatCanvas.getContext('2d');
   fctx.putImageData(flatCleanData, 0, 0);
   drawBoundaryMarker(fctx);
-  if (trainingMode) { drawTrainCandidates(fctx); return; }
   if (overlayVisible) drawCells(fctx);
 }
 function drawBoundaryMarker(fctx) {
@@ -946,7 +942,6 @@ function drawCells(fctx) {
     const R = c.r + RING_GAP;
     let stroke, dashed = false, faint = false, num = c.num;
     if (c.dismissed)            { stroke = 'rgba(150,160,170,0.75)'; dashed = true; faint = true; num = null; }
-    else if (c.autoHidden)      { stroke = 'rgba(150,170,200,0.7)';  dashed = true; faint = true; num = null; } // hidden by the cell-line classifier
     else if (c.state === 'in')  { stroke = isDead(c) ? 'rgba(80,150,255,0.98)' : 'rgba(60,220,130,0.98)'; }
     else if (c.state === 'out') { stroke = 'rgba(255,170,60,0.96)'; num = null; }
     else if (c.added)           { stroke = 'rgba(150,160,170,0.85)'; faint = true; num = null; }
@@ -971,7 +966,7 @@ function drawCells(fctx) {
   }
 }
 
-/* ---- segmentation: returns candidate blobs {x,y,r,area,meanI,varI,blueness} ---- */
+/* ---- segmentation: returns candidate blobs {x,y,r,blueness} ---- */
 // ---- cached preprocessing (does NOT depend on sensitivity) ------------------
 // The grayscale + top-hat + Otsu base only depend on the flattened photo, not on the
 // sensitivity slider. Computing them once per flatten (instead of every recount) makes
@@ -1068,8 +1063,7 @@ function segmentBlobs(sv) {
         }
       }
       if (strong < Math.max(3,(2*reach+1)**2*0.14)) continue;
-      const fp = featuresAt(cx, cy, r);
-      out.push({ x: cx, y: cy, r, area: Math.round(Math.PI * r * r), ...fp });
+      out.push({ x: cx, y: cy, r, blueness: bluenessAt(cx, cy, r) });
     }
     return out;
   } catch (e) {
@@ -1086,7 +1080,11 @@ function segmentBlobs(sv) {
 function countCells(quiet) {
   if (!cvReady || !flatCleanData) { setCountStatus('Flatten a square first.'); hideBusy(); return; }
   if (!quiet) { setCountStatus('Counting…'); showBusy('Counting cells…'); }
-  setTimeout(() => { try { runCount(); } finally { if (!quiet) hideBusy(); } }, quiet ? 0 : 30);
+  const source = flatCleanData;
+  laterForPhoto(() => {
+    if (flatCleanData !== source) return;
+    try { runCount(); } finally { if (!quiet) hideBusy(); }
+  }, quiet ? 0 : 30);
 }
 function runCount() {
   cells = []; hasCount=false; updateSaveButton();
@@ -1096,32 +1094,25 @@ function runCount() {
     blobs.forEach((b) => {
       const state = classifyCell(b.x, b.y, b.r, FLAT_OUT, FLAT_MARGIN);
       if (state === 'drop') return;
-      cells.push({ x: b.x, y: b.y, r: b.r, area: b.area, state,
-        dismissed: false, added: false, autoHidden: false, userLabeled: false,
+      cells.push({ x: b.x, y: b.y, r: b.r, state,
+        dismissed: false, added: false,
         flip: false, cyc: 0, deadBase: false,
-        meanI: b.meanI, varI: b.varI, blueness: b.blueness });
+        blueness: b.blueness });
     });
     recomputeDead();                                      // set deadBase relative to background
 
     manualLive = 0; manualDead = 0; manualMode = 'live';
-    // Trypan + dilution are remembered per profile (loaded on profile open, persisted on change),
-    // so we keep them across photos rather than resetting every count. Just reflect them in the field.
     if (dilutionInput) dilutionInput.value = String(dilution);
     applyTrypan();
-    applyClassifier();                // Phase 3: auto-hide debris if a trained line is active
     hasCount = true; savedThisCount = false;
     showCountTools(true);
-    updateCellLineButtons();
     redrawCount();
 
     const inN = cells.filter(isCounted).length;
-    const hidden = cells.filter((c) => c.autoHidden).length;
-    dlog(`counted: ${inN} in, trypan ${trypanOn ? 'on' : 'off'}, sens ${sensitivity}, dead ${deadLevel}` + (hidden ? `, hid ${hidden}` : ''));
-    let msg = cells.length === 0
+    dlog('Counted '+inN+' cells; detection sensitivity '+sensitivity);
+    const msg = cells.length === 0
       ? 'No cells found. Tap a missed cell to add it, or adjust detection sensitivity in Count settings.'
-      : 'Tap a ring to cycle it' + (trypanOn ? ' (live\u2194dead \u2192 remove \u2192 back)' : ' (remove \u2192 restore)') + '. Tap a missed cell to add it.';
-    if (activeCellLineId != null && classifierReady() && hidden > 0)
-      msg += ` \u00B7 learning hid ${hidden} look-alike${hidden === 1 ? '' : 's'} (tap to keep).`;
+      : tapHint();
     setCountStatus(msg);
   } catch (e) {
     console.error('count error:', e); dlog('count FAILED: ' + e.message); setCountStatus('Counting failed \u2014 see debug log.');
@@ -1130,18 +1121,38 @@ function runCount() {
 
 /* ---- Trypan blue (live/dead) + dilution + readout ---- */
 function isDead(c) { return trypanOn && (c.flip ? !c.deadBase : c.deadBase); }
+function tapHint() {
+  return trypanOn
+    ? 'Tap a ring to change live/dead, remove it, then restore it. Tap a missed cell to add it.'
+    : 'Tap a ring to remove or restore it. Tap a missed cell to add it.';
+}
 function applyTrypan() {
   recomputeDead();
+  document.getElementById('includedLabel').textContent = trypanOn ? 'Live' : 'Counted';
+  document.getElementById('deadLegend').hidden = !trypanOn;
   trypanYes.classList.toggle('active', trypanOn);
   trypanNo.classList.toggle('active', !trypanOn);
+  trypanYes.setAttribute('aria-pressed', String(trypanOn));
+  trypanNo.setAttribute('aria-pressed', String(!trypanOn));
 }
-function setTrypan(on) { trypanOn = on; applyTrypan(); setDilutionForTrypan(on); updateToolsVisibility(); redrawCount(); saveProfilePref(); }
+function setTrypan(on) {
+  if (trypanOn === on) return;
+  trypanOn = on;
+  applyTrypan();
+  setDilutionForTrypan(on);
+  updateToolsVisibility();
+  if (hasCount) {
+    redrawCount();
+    if (cells.length) setCountStatus(tapHint());
+  }
+  savePreferences();
+}
 function setDeadLevel(v) {                 // 1..10 dead sensitivity (higher = MORE cells dead)
   deadLevel = clamp(v, 1, 10);
   if (blueLabel) blueLabel.textContent = deadLevel;
   recomputeDead();
   redrawCount();
-  saveProfilePref();
+  savePreferences();
 }
 
 // Dilution field: Yes -> 2 (diluted half); No -> 0 (no dilution). 0 and 1 both
@@ -1172,7 +1183,7 @@ function setConcUnit(u) {
   if (concMlBtn) concMlBtn.classList.toggle('active', concUnit === 'mL');
   if (concUlBtn) concUlBtn.classList.toggle('active', concUnit === 'uL');
   updateReadout(); updateCalc();
-  saveProfilePref();
+  savePreferences();
 }
 
 /* ---- dilution / seeding calculator (request 3) ----
@@ -1268,50 +1279,50 @@ function updateLimitDil() {
   } catch (e) { dlog('limit-dilution calc failed: ' + e.message); }
 }
 
-/* recent / preset "cells needed" values, saved per profile so the user rarely retypes (req 4) */
-let profileRecentCounts = [];                 // most-recent first
-const CALC_DEFAULT_PRESETS = [1000000, 500000, 250000, 100000];
-function fmtChip(n) {                          // compact chip label: 1M, 250k, 5,000
-  if (n >= 1e6) return (n / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 }) + 'M';
-  if (n >= 1e3) return (n / 1e3).toLocaleString(undefined, { maximumFractionDigits: 1 }) + 'k';
-  return String(n);
-}
+const QUICK_COUNTS = [20000, 70000, 120000, 240000, 600000, 1500000];
+let lastUsedCount = null;
 function renderCalcRecent() {
-  if (!calcRecent) return;
-  calcRecent.innerHTML = '';
-  const list = profileRecentCounts.length ? profileRecentCounts : CALC_DEFAULT_PRESETS;
-  const lead = document.createElement('span'); lead.className = 'calc-recent-label';
-  lead.textContent = profileRecentCounts.length ? 'Recent:' : 'Quick:';
-  calcRecent.appendChild(lead);
-  list.slice(0, 8).forEach((n) => {
-    const b = document.createElement('button');
-    b.type = 'button'; b.className = 'chip'; b.textContent = fmtChip(n);
-    b.title = n.toLocaleString() + ' cells';
-    b.addEventListener('click', () => {
-      if (calcCells) calcCells.value = n.toLocaleString();
-      if (calcBox && !calcBox.open) calcBox.open = true;
-      updateCalc();
-      rememberCount(n);                        // bumps it to the front
-    });
-    calcRecent.appendChild(b);
-  });
+  const values = QUICK_COUNTS.slice();
+  if (lastUsedCount && !values.includes(lastUsedCount)) values.push(lastUsedCount);
+  // Keep existing buttons in place when committing typed input on blur so
+  // a simultaneous tap on a shortcut still reaches its click handler.
+  for (const button of [...calcRecent.children]) {
+    if (!values.includes(Number(button.value))) button.remove();
+  }
+  for (const n of values) {
+    let button = calcRecent.querySelector('button[value="'+n+'"]');
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'chip';
+      button.value = String(n);
+      button.append(n.toLocaleString('en-US'));
+      const label = document.createElement('small');
+      label.textContent = 'Last used';
+      button.append(label);
+      // A blur commits typed input and can replace the last-used button.
+      // Apply the tapped value first, then move focus off the input.
+      button.addEventListener('pointerdown', event => {
+        if (document.activeElement === calcCells) event.preventDefault();
+      });
+      button.addEventListener('click', () => {
+        calcCells.value = n.toLocaleString('en-US');
+        updateCalc();
+        rememberCount(n);
+        button.focus({preventScroll:true});
+      });
+      calcRecent.append(button);
+    }
+    button.querySelector('small').hidden = n !== lastUsedCount;
+  }
 }
 function rememberCount(n) {
-  n = Math.round(n);
-  if (!isFinite(n) || n <= 0) return;
-  profileRecentCounts = [n, ...profileRecentCounts.filter((x) => x !== n)].slice(0, 8);
+  if (!Number.isSafeInteger(n) || n <= 0 || n === lastUsedCount) return;
+  lastUsedCount = n;
   renderCalcRecent();
-  saveRecentCounts();
+  savePreferences();
 }
-async function saveRecentCounts() {
-  if (!storageOK || activeProfileId == null) return;
-  try {
-    const p = await pGet('profiles', Number(activeProfileId));
-    if (!p) return;
-    p.recentCounts = profileRecentCounts;
-    await pPut('profiles', p);
-  } catch (e) { dlog('recent-counts save failed: ' + e.message); }
-}
+
 function liveDeadTotals() {                          // detector counts + manual nudge (manual can be negative)
   const counted = cells.filter(isCounted);
   const detDead = trypanOn ? counted.filter((c) => isDead(c)).length : 0;
@@ -1335,7 +1346,6 @@ function updateReadout() {
   } else {
     txt += `\n\u2248 ${fmtConcUnit(totalConc)}  (this square)`;
   }
-  document.getElementById('stainNote').textContent=(trypanOn?'Trypan blue':'Unstained')+' · '+dilution+'× dilution';
   countReadout.textContent = txt;
   countReadout.style.display = 'block';
   updateCountHint(total);
@@ -1378,17 +1388,12 @@ function updateManualUI() {
   const sign = n > 0 ? '+' : '';                  // negatives already carry '-'
   manualLabel.textContent = `${sign}${n} ${what}`;
 }
-// Slider visibility. A trained cell line replaces the manual knobs, so when one is
-// active we hide BOTH the detection-sensitivity and the dead-(blue)-sensitivity sliders.
-// Under Default (no learning): detection sensitivity always shows; dead-blue only when Trypan is on.
 function updateToolsVisibility() {
-  const trained = activeCellLineId != null;        // a named cell line is doing the counting/dead call
-  if (sensGroup) sensGroup.style.display = trained ? 'none' : '';
-  if (sliderGroup) sliderGroup.style.display = (trypanOn && !trained) ? '' : 'none';
+  sliderGroup.style.display = trypanOn ? '' : 'none';
   updateManualUI();
 }
 
-/* ---- tap to correct: cycle state / remove / add (+ teach the active cell line) ----
+/* ---- tap to correct: cycle state / remove / add ----
    Called only on a confirmed single-finger TAP (see the tap-gating below), so a
    two-finger pinch-zoom no longer toggles a cell, and a one-finger drag pans. */
 function flatTapAt(clientX, clientY) {
@@ -1397,7 +1402,6 @@ function flatTapAt(clientX, clientY) {
   const sx = flatCanvas.width / rect.width;                 // displayed -> 900-space
   const x = (clientX - rect.left) * sx, y = (clientY - rect.top) * sx;
 
-  if (trainingMode) { toggleCandidate(x, y); return; }      // Phase 3 training: tap = mark a cell/debris
   if (!overlayVisible) return;                              // circles hidden for manual counting
 
   let hit = -1, hd = Infinity;
@@ -1408,17 +1412,11 @@ function flatTapAt(clientX, clientY) {
   }
   if (hit >= 0) {
     const c = cells[hit];
-    if (c.autoHidden) {                                     // restore a cell the classifier hid -> teach "cell"
-      c.autoHidden = false; c.userLabeled = true; appendLabel(c, 1);
-    } else {
-      if (trypanOn) c.cyc = (c.cyc + 1) % 3; else c.cyc = (c.cyc === 2 ? 0 : 2);
-      c.flip = (c.cyc === 1);
-      c.dismissed = (c.cyc === 2);
-      if (c.dismissed) { c.userLabeled = true; appendLabel(c, 0); }  // removed -> teach "debris"
-    }
+    c.cyc = trypanOn ? (c.cyc + 1) % 3 : (c.cyc === 2 ? 0 : 2);
+    c.flip = c.cyc === 1;
+    c.dismissed = c.cyc === 2;
   } else {
-    const added = addCellAt(x, y);                          // tap empty space -> add a missed cell
-    if (added) appendLabel(added, 1);
+    addCellAt(x, y);
   }
   redrawCount();
 }
@@ -1431,10 +1429,10 @@ function addCellAt(x, y) {
   const cx = found ? found.cx : x, cy = found ? found.cy : y;
   const r = found ? found.r : medianR();
   const state = classifyCell(cx, cy, r, FLAT_OUT, FLAT_MARGIN);
-  const fp = featuresAt(cx, cy, r);
+  const blueness = bluenessAt(cx, cy, r);
   const c = { x: cx, y: cy, r, area: Math.round(Math.PI * r * r), state,
-    dismissed: false, added: true, autoHidden: false, userLabeled: true,
-    flip: false, cyc: 0, deadBase: (fp.blueness - bgBlue) > deadMarginK() * bgSpread, ...fp };
+    dismissed: false, added: true,
+    flip: false, cyc: 0, deadBase: (blueness - bgBlue) > deadMarginK() * bgSpread, blueness };
   cells.push(c);
   return c;
 }
@@ -1481,7 +1479,6 @@ function showCountTools(on) {
   if (on) {
     if (sensSlider) sensSlider.value = sensitivity;
     if (sensLabel) sensLabel.textContent = sensitivity;
-    if (celllineRow) celllineRow.style.display = storageOK ? '' : 'none';
     updateToolsVisibility();
   }
 }
@@ -1496,7 +1493,7 @@ function resetCountDefaults() {
   deadLevel = 5;                                   // also reset dead (blue) sensitivity to the default
   if (blueSlider) blueSlider.value = 5;
   if (blueLabel) blueLabel.textContent = 5;
-  saveProfilePref();
+  savePreferences();
   overlayVisible = true;
   if (toggleOverlayBtn) toggleOverlayBtn.textContent = 'Hide circles';
   countCells();                       // fresh recount clears manual edits + re-auto-detects
@@ -1510,7 +1507,7 @@ function toggleOverlay() {
 /* ---- wire the count-tool controls ---- */
 // TAP-GATING: only fire a tap when it's a clean single-finger tap (no 2nd finger,
 // little movement, quick). This stops a pinch-zoom from toggling cells, and lets a
-// one-finger drag pan the (zoomed) page. Works the same in training mode.
+// one-finger drag pan the (zoomed) page.
 let _tapStart = null, _tapCancelled = false;
 const _activePtrs = new Set();
 flatCanvas.addEventListener('pointerdown', (e) => {
@@ -1548,7 +1545,7 @@ dilutionInput.addEventListener('input', () => {
   dilution = (isFinite(v) && v > 1) ? v : 1;     // 0 or 1 -> no dilution
   updateReadout(); updateCalc();
   savedThisCount = false; updateSaveButton();
-  saveProfilePref();                              // remember the user's dilution for this profile
+  savePreferences();                              // remember the dilution on this device
 });
 blueSlider.addEventListener('input', () => setDeadLevel(parseInt(blueSlider.value, 10)));
 if (concMlBtn) concMlBtn.addEventListener('click', () => setConcUnit('mL'));
@@ -1559,7 +1556,7 @@ sensSlider.addEventListener('input', () => {
   if (sensLabel) sensLabel.textContent = sensitivity;
   clearTimeout(sensTimer);
   // debounce + QUIET recount (no full-screen spinner) so you can drag the slider and watch it update
-  sensTimer = setTimeout(() => { saveProfilePref(); if (flatCleanData) countCells(true); }, 160);
+  sensTimer = setTimeout(() => { savePreferences(); if (flatCleanData) countCells(true); }, 160);
 });
 manualMinus.addEventListener('click', () => adjustManual(-1));
 manualPlus.addEventListener('click', () => adjustManual(1));
@@ -1568,399 +1565,63 @@ manualDeadBtn.addEventListener('click', () => setManualMode('dead'));
 // dilution / seeding calculator inputs
 if (calcCells) calcCells.addEventListener('input', updateCalc);
 if (calcCells) calcCells.addEventListener('change', () => {       // commit (blur/Enter) -> save to recents
-  const n = parseFloat(String(calcCells.value).replace(/[, ]/g, ''));
-  if (isFinite(n) && n > 0) rememberCount(n);
+  const n = Number(calcCells.value.replace(/[, ]/g, ''));
+  rememberCount(n);
 });
 if (calcFinal) calcFinal.addEventListener('input', updateCalc);
 // limiting-dilution (cloning) inputs
 [ldCells, ldVol, ldWells].forEach((el) => { if (el) el.addEventListener('input', updateLimitDil); });
 
-/* ===========================================================================
-   PHASE 3 — NAMED CELL-LINE CLASSIFIERS + TRAINING MODE
-   Default (activeCellLineId = null) = plain counting, NO learning (unchanged).
-   "Train new" -> name it -> tap the REAL CELLS on the current flatten. Each tap CYCLES
-   that blob's mark the same way counting does: cell -> dead -> not-a-cell -> back (Trypan
-   off skips "dead"). Tap empty space to add a missed cell. Untapped candidates are NOT saved.
-   Two classifier modes (auto-selected):
-     * k-NN  — when you labelled both cells AND debris (>=2 each): a blob is hidden
-               if most of its nearest labelled neighbours are debris.
-     * one-class — when you labelled CELLS ONLY (>=5): a blob is hidden if it's an
-               OUTLIER (far from the learned cell cluster). No debris taps needed.
-   Auto-hidden debris is faint + restorable by tapping. Wrapped so counting never breaks.
-   =========================================================================== */
-let cellLines = [];            // [{id, profileId, name, createdAt}] for the active profile
-let activeCellLineId = null;   // null = Default (no learning)
-let labelStore = [];           // labels for the active line: [{label:1|0, f:{meanI,varI,blueness,r}}]
-let trainingMode = false;
-let trainCandidates = [];      // [{x,y,r,...fp, mark:null|'cell'|'dead'|'debris', orig}]  (tap cycles the mark)
-let pendingLineId = null;      // line being trained (deleted if training is cancelled)
-let isRetrain = false;         // true = improving an existing line from the counted photo (Improve)
-
-function featVec(f) { return [f.meanI, f.varI, f.blueness, f.r]; }
-function posLabels() { return labelStore.filter((l) => l.label === 1); }
-// kind of a label: explicit when trained in Phase-this; inferred for older records.
-function labelKind(l) { return l.kind || (l.label === 1 ? 'cell' : 'debris'); }
-function deadExamples() { return labelStore.filter((l) => labelKind(l) === 'dead'); }     // real cells, stained
-function liveExamples() { return labelStore.filter((l) => labelKind(l) === 'cell'); }     // real cells, unstained
-function featScaleFrom(list) {
-  const n = list.length; if (n < 2) return [1, 1, 1, 1];
-  const mean = [0, 0, 0, 0], v = [0, 0, 0, 0];
-  list.forEach((l) => { const f = featVec(l.f); for (let d = 0; d < 4; d++) mean[d] += f[d]; });
-  for (let d = 0; d < 4; d++) mean[d] /= n;
-  list.forEach((l) => { const f = featVec(l.f); for (let d = 0; d < 4; d++) { const e = f[d] - mean[d]; v[d] += e * e; } });
-  return v.map((s) => Math.sqrt(s / n) || 1);
-}
-// ---- trained live/dead (Trypan) model: only when the user labelled enough of BOTH (req 7) ----
-function deadModelReady() { return activeCellLineId != null && deadExamples().length >= 3 && liveExamples().length >= 3; }
-function predictDeadTrained(o) {                          // true => dead (blue). k-NN over dead vs live examples.
-  const dead = deadExamples(), live = liveExamples();
-  const all = dead.map((l) => ({ f: l.f, dead: true })).concat(live.map((l) => ({ f: l.f, dead: false })));
-  const scale = featScaleFrom(dead.concat(live));
-  const f = featVec(o);
-  const dists = all.map((e) => {
-    const ef = featVec(e.f); let s = 0;
-    for (let d = 0; d < 4; d++) { const z = (f[d] - ef[d]) / (scale[d] || 1); s += z * z; }
-    return { d: Math.sqrt(s), dead: e.dead };
-  }).sort((a, b) => a.d - b.d);
-  const k = Math.min(5, dists.length); let nd = 0, nl = 0;
-  for (let i = 0; i < k; i++) { if (dists[i].dead) nd++; else nl++; }
-  return nd > nl;
-}
-function classifierMode() {
-  if (activeCellLineId == null) return 'off';
-  const pos = posLabels().length, neg = labelStore.length - pos;
-  if (pos >= 2 && neg >= 2 && labelStore.length >= 6) return 'knn';
-  if (pos >= 5) return 'oneclass';
-  return 'off';
-}
-function classifierReady() { return activeCellLineId != null && classifierMode() !== 'off'; }
-function predictDebris(o) {                              // true => predicted debris (hide it)
-  const mode = classifierMode();
-  const f = featVec(o);
-  if (mode === 'knn') {
-    const scale = featScaleFrom(labelStore);
-    const dists = labelStore.map((l) => {
-      const lf = featVec(l.f); let s = 0;
-      for (let d = 0; d < 4; d++) { const e = (f[d] - lf[d]) / (scale[d] || 1); s += e * e; }
-      return { d: Math.sqrt(s), label: l.label };
-    }).sort((a, b) => a.d - b.d);
-    const k = Math.min(5, dists.length);
-    let pos = 0, neg = 0;
-    for (let i = 0; i < k; i++) { if (dists[i].label === 1) pos++; else neg++; }
-    return neg > pos;
-  }
-  if (mode === 'oneclass') {                             // outlier vs the labelled cell cluster
-    const pos = posLabels(), scale = featScaleFrom(pos);
-    const dists = pos.map((l) => {
-      const lf = featVec(l.f); let s = 0;
-      for (let d = 0; d < 4; d++) { const e = (f[d] - lf[d]) / (scale[d] || 1); s += e * e; }
-      return Math.sqrt(s);
-    }).sort((a, b) => a - b);
-    const k = Math.min(3, dists.length); if (!k) return false;
-    let avg = 0; for (let i = 0; i < k; i++) avg += dists[i]; avg /= k;
-    return avg > ONECLASS_T;
-  }
-  return false;
-}
-function applyClassifier() {                             // hide look-alike debris on the current count
-  if (!classifierReady()) return;
-  try {
-    cells.forEach((c) => {
-      if (c.state !== 'in' || c.userLabeled) return;     // only auto-hide counted, non-user-touched cells
-      if (predictDebris(c)) c.autoHidden = true;
-    });
-  } catch (e) { dlog('classifier error: ' + e.message); }
-}
-function appendLabel(c, label) {                         // a tap-correction teaches the active line
-  if (activeCellLineId == null || !storageOK) return;
-  const rec = { cellLineId: activeCellLineId, label, f: { meanI: c.meanI, varI: c.varI, blueness: c.blueness, r: c.r }, createdAt: Date.now() };
-  labelStore.push(rec);
-  pAdd('labels', rec).catch((e) => dlog('label save failed: ' + e.message));
-}
-
-/* ---- cell-line list + selector ---- */
-async function loadCellLines() {
-  try { cellLines = activeProfileId != null ? await pByIndex('cellLines', 'profileId', Number(activeProfileId)) : []; }
-  catch (e) { cellLines = []; dlog('cellLines load failed: ' + e.message); }
-  populateCellLineSelect();
-}
-function populateCellLineSelect() {
-  if (!cellLineSelect) return;
-  cellLineSelect.innerHTML = '';
-  const def = document.createElement('option'); def.value = ''; def.textContent = 'Default — no learning';
-  cellLineSelect.appendChild(def);
-  cellLines.forEach((cl) => { const o = document.createElement('option'); o.value = cl.id; o.textContent = cl.name; cellLineSelect.appendChild(o); });
-  cellLineSelect.value = activeCellLineId == null ? '' : String(activeCellLineId);
-  updateCellLineButtons();
-}
-// Retrain/Improve + delete show only for a real (non-Default) trained line; Improve needs a current count.
-function updateCellLineButtons() {
-  const active = activeCellLineId != null && !trainingMode;
-  if (deleteCellLineBtn) deleteCellLineBtn.style.display = active ? '' : 'none';
-  if (retrainBtn) { retrainBtn.style.display = active ? '' : 'none'; retrainBtn.disabled = !hasCount; }
-  if (typeof updateToolsVisibility === 'function') updateToolsVisibility();   // show/hide sliders for the active line
-}
-async function loadLabels() {
-  try { labelStore = activeCellLineId != null ? await pByIndex('labels', 'cellLineId', activeCellLineId) : []; }
-  catch (e) { labelStore = []; dlog('labels load failed: ' + e.message); }
-}
-// delete a cell line and all of its labels (delete the line even if the label lookup fails)
-async function deleteLineCascade(lineId) {
-  let labs = [];
-  try { labs = await pByIndex('labels', 'cellLineId', lineId); }
-  catch (e) { dlog('delete line: label lookup failed (' + e.message + ') — deleting the line anyway'); }
-  for (const l of labs) { try { await pDelete('labels', l.id); } catch (_) {} }
-  try { await pDelete('cellLines', lineId); }
-  catch (e) { dlog('delete cellLine failed: ' + e.message); }
-}
-async function deleteActiveCellLine() {
-  if (activeCellLineId == null) return;
-  const nm = (cellLines.find((l) => l.id === activeCellLineId) || {}).name || 'this cell line';
-  if (!confirm(`Delete "${nm}" and everything it learned? This cannot be undone. (Your counts and profiles are kept.)`)) return;
-  const gone = activeCellLineId;
-  await deleteLineCascade(gone);
-  dlog(`deleted cell line ${gone}`);
-  activeCellLineId = null;
-  await loadCellLines();
-  await loadLabels();
-  if (cellLineSelect) cellLineSelect.value = '';
-  if (hasCount) { cells.forEach((c) => { if (!c.userLabeled) c.autoHidden = false; }); recomputeDead(); redrawCount(); }
-  setCountStatus(`Deleted "${nm}". Back to Default — no learning.`);
-}
-async function setActiveCellLine(id) {
-  activeCellLineId = (id === '' || id == null) ? null : Number(id);
-  await loadLabels();
-  updateCellLineButtons();
-  if (!hasCount) return;
-  showBusy('Recounting…');                                // brief indicator that it re-evaluated (request 6)
-  setTimeout(() => {
-    try {
-      cells.forEach((c) => { if (!c.userLabeled) c.autoHidden = false; });
-      recomputeDead();                                    // dead model may differ per line (req 7)
-      applyClassifier();
-      redrawCount();
-      const nm = activeCellLineId == null ? 'Default (no learning)' : (cellLines.find((l) => l.id === activeCellLineId) || {}).name || 'cell line';
-      const hidden = cells.filter((c) => c.autoHidden).length;
-      let note = `Recounted with ${nm}`;
-      if (activeCellLineId != null && classifierReady() && hidden > 0) note += ` · hid ${hidden} look-alike${hidden === 1 ? '' : 's'}`;
-      if (activeCellLineId != null && deadModelReady()) note += ' · using trained live/dead';
-      setCountStatus(note + '.');
-    } finally { hideBusy(); }
-  }, 60);
-}
-
-/* ---- training mode ---- */
-function showTrainBar(on) {
-  if (trainBar) trainBar.style.display = on ? 'block' : 'none';
-  if (countTools) countTools.style.display = on ? 'none' : (hasCount ? 'block' : 'none');
-  if (resetBtn) resetBtn.disabled = on;
-  if (toggleOverlayBtn) toggleOverlayBtn.disabled = on;
-}
-// Mark cycle for a candidate — mirrors the counting tap cycle so live/dead/remove feels identical.
-// The FIRST tap flips live<->dead; the next marks "not-a-cell" (debris/remove); the next returns to start.
-// New (just-added) candidates start unmarked, so they also have a "clear" step.
-function trainRing(orig) {
-  if (!trypanOn) {
-    if (orig == null) return [null, 'cell', 'debris'];
-    return orig === 'debris' ? ['debris', 'cell'] : ['cell', 'debris'];
-  }
-  if (orig == null) return [null, 'cell', 'dead', 'debris'];
-  if (orig === 'cell') return ['cell', 'dead', 'debris'];
-  if (orig === 'dead') return ['dead', 'cell', 'debris'];
-  if (orig === 'debris') return ['debris', 'cell', 'dead'];
-  return ['cell', 'dead', 'debris'];
-}
-function updateTrainCount() {
-  const cellsN = trainCandidates.filter((c) => c.mark === 'cell').length;
-  const deadN = trainCandidates.filter((c) => c.mark === 'dead').length;
-  const debrisN = trainCandidates.filter((c) => c.mark === 'debris').length;
-  if (trainCount) trainCount.textContent = `${cellsN} cells · ${deadN} dead · ${debrisN} debris`;
-}
-function drawTrainCandidates(fctx) {
-  const fill = { cell: 'rgba(60,220,130,0.22)', dead: 'rgba(70,150,255,0.24)', debris: 'rgba(255,120,60,0.20)' };
-  const line = { cell: 'rgba(60,220,130,0.98)', dead: 'rgba(80,160,255,0.98)', debris: 'rgba(255,120,60,0.98)' };
-  for (const c of trainCandidates) {
-    const R = c.r + RING_GAP;
-    fctx.setLineDash([]);
-    fctx.beginPath(); fctx.arc(c.x, c.y, R, 0, Math.PI * 2);
-    fctx.lineWidth = 4.5; fctx.strokeStyle = 'rgba(0,0,0,0.45)'; fctx.stroke();
-    if (c.mark && fill[c.mark]) { fctx.beginPath(); fctx.arc(c.x, c.y, R, 0, Math.PI * 2); fctx.fillStyle = fill[c.mark]; fctx.fill(); }
-    fctx.beginPath(); fctx.arc(c.x, c.y, R, 0, Math.PI * 2);
-    fctx.lineWidth = c.mark ? 3 : 1.6;
-    fctx.strokeStyle = (c.mark && line[c.mark]) ? line[c.mark] : 'rgba(255,255,255,0.5)';
-    fctx.stroke();
-  }
-}
-function toggleCandidate(x, y) {
-  const sx = flatCanvas.width / flatCanvas.getBoundingClientRect().width;
-  let hit = -1, hd = Infinity;
-  for (let i = 0; i < trainCandidates.length; i++) {
-    const c = trainCandidates[i], d = Math.hypot(x - c.x, y - c.y);
-    const grab = c.r + RING_GAP + TAP_TOL * sx;
-    if (d <= grab && d < hd) { hd = d; hit = i; }
-  }
-  if (hit < 0) {                                   // tap empty space -> add a missed cell (snaps to a bright blob)
-    const found = detectBlobNear(x, y);
-    const cx = found ? found.cx : x, cy = found ? found.cy : y;
-    const r = found ? found.r : medianR();
-    const fp = featuresAt(cx, cy, r);
-    trainCandidates.push({ x: cx, y: cy, r, meanI: fp.meanI, varI: fp.varI, blueness: fp.blueness, mark: 'cell', orig: null });
-    updateTrainCount(); renderFlat();
-    return;
-  }
-  const c = trainCandidates[hit];
-  const ring = trainRing(c.orig == null ? null : c.orig);
-  let idx = ring.indexOf(c.mark == null ? null : c.mark);
-  if (idx < 0) idx = 0;
-  c.mark = ring[(idx + 1) % ring.length];          // advance one step in the cycle
-  updateTrainCount(); renderFlat();
-}
-function trainCandidateFrom(b) {
-  return { x: b.x, y: b.y, r: b.r, meanI: b.meanI, varI: b.varI, blueness: b.blueness, mark: null, orig: null };
-}
-async function startTraining() {
-  if (!flatCleanData) { setCountStatus('Flatten & count a square first.'); return; }
-  if (!storageOK) { setCountStatus('On-device storage is unavailable, so cell lines can\u2019t be saved here.'); return; }
-  const ok = confirm('Training is only needed for unusual cell shapes the normal counter struggles with. If the default counting already works, you don\u2019t need this.\n\nTrain a new cell line anyway?');
-  if (!ok) return;
-  const name = prompt('Name this cell line (e.g. "HeLa P12"):');
-  if (!name || !name.trim()) return;
-  let id;
-  try { id = await pAdd('cellLines', { profileId: Number(activeProfileId), name: name.trim(), createdAt: Date.now() }); }
-  catch (e) { dlog('cellLine create failed: ' + e.message); setCountStatus('Could not create the cell line.'); return; }
-  pendingLineId = id; isRetrain = false;
-  await loadCellLines();
-  activeCellLineId = id; if (cellLineSelect) cellLineSelect.value = String(id);
-
-  showBusy('Finding candidates…');
-  setTimeout(() => {
-    try {
-      const blobs = segmentBlobs(10);      // train at MAX sensitivity so every shape is offered (req 6)
-      trainCandidates = blobs
-        .filter((b) => classifyCell(b.x, b.y, b.r, FLAT_OUT, FLAT_MARGIN) !== 'drop')
-        .map(trainCandidateFrom);
-      trainingMode = true; updateCellLineButtons();
-      showTrainBar(true);
-      updateTrainCount();
-      renderFlat();
-      if (trainHint) trainHint.textContent = trypanOn
-        ? 'Tap each real cell — it turns green. Tap the same cell again to mark it dead (blue), again for not-a-cell, again to clear. ~15–25 cells is plenty; you needn\u2019t tap everything. Tap a missed cell to add it.'
-        : 'Tap each real cell — it turns green. Tap it again to mark it not-a-cell, again to clear. ~15–25 cells is plenty; you needn\u2019t tap everything. Tap a missed cell to add it.';
-    } finally { hideBusy(); }
-  }, 30);
-}
-// Improve (was "Retrain"): refine the ACTIVE line using the cells as actually counted.
-// Cells are pre-marked (live=green, dead=blue); tap to fix the same way you correct a count,
-// and tap empty space to add a missed cell. Done saves only the changes.
-async function startRetrain() {
-  if (activeCellLineId == null) { setCountStatus('Pick a trained cell line first.'); return; }
-  if (!hasCount || !flatCleanData) { setCountStatus('Count a square first, then Improve.'); return; }
-  if (!storageOK) { setCountStatus('On-device storage is unavailable.'); return; }
-  pendingLineId = null; isRetrain = true;
-  // seed from the cells currently shown as counted; pre-mark from the live/dead call so the user only fixes mistakes
-  trainCandidates = cells.filter(isCounted).map((c) => {
-    const m = isDead(c) ? 'dead' : 'cell';
-    return { x: c.x, y: c.y, r: c.r, meanI: c.meanI, varI: c.varI, blueness: c.blueness, mark: m, orig: m };
-  });
-  trainingMode = true; updateCellLineButtons();
-  showTrainBar(true);
-  updateTrainCount();
-  renderFlat();
-  const nm = (cellLines.find((l) => l.id === activeCellLineId) || {}).name || 'this cell line';
-  if (trainHint) trainHint.textContent = trypanOn
-    ? `Improving “${nm}”: tap a wrong cell to flip live\u2194dead, tap again to mark it not-a-cell, again to undo. Tap a missed cell to add it. Done saves your fixes.`
-    : `Improving “${nm}”: tap a wrong cell to mark it not-a-cell, tap again to undo. Tap a missed cell to add it. Done saves your fixes.`;
-}
-function candToRec(c) {                       // cell/dead -> real cell (label 1); debris -> not-a-cell (label 0)
-  return { cellLineId: activeCellLineId, label: c.mark === 'debris' ? 0 : 1, kind: c.mark,
-           f: { meanI: c.meanI, varI: c.varI, blueness: c.blueness, r: c.r }, createdAt: Date.now() };
-}
-async function finishTraining() {
-  // Train-new: save everything the user marked. Improve: save ONLY genuine changes (corrections +
-  // newly-added cells), so re-improving the same square doesn't pile up duplicate/contradictory labels.
-  const toSave = isRetrain
-    ? trainCandidates.filter((c) => c.mark && (c.orig == null ? null : c.orig) !== c.mark)
-    : trainCandidates.filter((c) => c.mark);
-  const recs = toSave.map(candToRec);
-  const nCells = recs.filter((r) => r.kind === 'cell').length;
-  const nDead = recs.filter((r) => r.kind === 'dead').length;
-  const nDebris = recs.filter((r) => r.kind === 'debris').length;
-  if (!isRetrain && (nCells + nDead) < 3) {   // a brand-new line needs a few real cells to learn from
-    setCountStatus('Tap at least a few real cells before pressing Done (or Cancel).');
-    return;
-  }
-  if (isRetrain && recs.length === 0) { setCountStatus('No changes to save — tap a wrong cell to fix it, or press Cancel.'); return; }
-  try { await pAddMany('labels', recs); dlog(`${isRetrain ? 'improved' : 'trained'} line ${activeCellLineId}: +${nCells} cells / +${nDead} dead / +${nDebris} not-a-cell`); }
-  catch (e) { dlog('train save FAILED: ' + e.message); }
-  pendingLineId = null; isRetrain = false;
-  trainingMode = false; trainCandidates = [];
-  showTrainBar(false); updateCellLineButtons();
-  await loadLabels();
-  countCells();                       // recount with the updated classifier active
-}
-async function cancelTraining() {
-  const wasRetrain = isRetrain;
-  trainingMode = false; trainCandidates = []; isRetrain = false;
-  showTrainBar(false);
-  if (!wasRetrain && pendingLineId != null) {   // remove the empty just-created line
-    try { await pDelete('cellLines', pendingLineId); } catch (_) {}
-    pendingLineId = null;
-    activeCellLineId = null;
-    if (cellLineSelect) cellLineSelect.value = '';
-    await loadCellLines();
-    await loadLabels();
-  }
-  updateCellLineButtons();
-  cells.forEach((c) => { if (!c.userLabeled) c.autoHidden = false; });   // back to Default: unhide
-  if (hasCount) redrawCount(); else renderFlat();
-}
-
-if (cellLineSelect) cellLineSelect.addEventListener('change', () => setActiveCellLine(cellLineSelect.value));
-if (trainBtn) trainBtn.addEventListener('click', startTraining);
-if (retrainBtn) retrainBtn.addEventListener('click', startRetrain);
-if (deleteCellLineBtn) deleteCellLineBtn.addEventListener('click', deleteActiveCellLine);
-if (trainDone) trainDone.addEventListener('click', finishTraining);
-if (trainCancel) trainCancel.addEventListener('click', cancelTraining);
-
-/* ===========================================================================
-   STORAGE (IndexedDB) + PROFILES + SESSIONS — on the phone, no server
-   A PROFILE = an equipment setup (scope + camera + zoom).
-   A SESSION = the squares you count this time (e.g. the 4 corners of one load).
-   v3 adds the Phase-3 stores: cellLines + labels.
-   =========================================================================== */
-const DB_NAME = 'cellCounterDB', DB_VER = 4;   // v4: back-fill cellLines/labels indexes that some older DBs lack
-let db = null, activeProfileId = null, storageOK = false;
-let currentSampleId = null;          // squares saved now belong to this session
+// On-device session history and workspace preferences.
+const DB_NAME = 'cellCounterDB', DB_VER = 5;
+let db = null, storageOK = false;
+let currentSessionKey = null;          // squares saved now belong to this session
 let hasCount = false;                // a count has been run on the current flatten
 let savedThisCount = false;          // current count already added to the session
 let deletedStack = [];               // squares removed with ✕ (stack — undo can step back many times)
-let prevSampleId = null;             // the session active before "New session" (so it can be undone)
+let previousSessionKey = null;             // the session active before "New session" (so it can be undone)
 let sessionSquares = [];             // saved squares in the current session (basis for the calculator)
 
 function openDB() {
   return new Promise((res, rej) => {
     const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onupgradeneeded = (e) => {
-      const d = e.target.result, tx = e.target.transaction;
-      if (!d.objectStoreNames.contains('profiles')) d.createObjectStore('profiles', { keyPath: 'id', autoIncrement: true });
-      if (!d.objectStoreNames.contains('squares')) {
-        const s = d.createObjectStore('squares', { keyPath: 'id', autoIncrement: true });
-        s.createIndex('profileId', 'profileId', { unique: false });
-      } else {                                   // harden: add the index if an old build lacked it
-        try { const s = tx.objectStore('squares'); if (!s.indexNames.contains('profileId')) s.createIndex('profileId', 'profileId', { unique: false }); } catch (_) {}
+    req.onupgradeneeded = () => {
+      const database = req.result, tx = req.transaction;
+      const existingSquares = database.objectStoreNames.contains('squares');
+      const squares = existingSquares ? tx.objectStore('squares')
+        : database.createObjectStore('squares', { keyPath: 'id', autoIncrement: true });
+      squares.createIndex('sessionKey', 'sessionKey');
+      const settings = database.createObjectStore('settings');
+      // The upgrade is atomic. Identical timestamps from different equipment
+      // setups retain separate histories. Preserve all other fields, including images.
+      if (existingSquares) {
+        const request = squares.openCursor();
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return;
+          const row = cursor.value;
+          row.sessionKey = row.sessionKey || (row.sampleId == null
+            ? 'old-square/'+row.id : 'old-session/'+(row.profileId ?? '')+'/'+row.sampleId);
+          cursor.update(row);
+          cursor.continue();
+        };
       }
-      if (!d.objectStoreNames.contains('cellLines')) {
-        const c = d.createObjectStore('cellLines', { keyPath: 'id', autoIncrement: true });
-        c.createIndex('profileId', 'profileId', { unique: false });
-      } else {                                   // harden: add the index if an older build lacked it
-        try { const c = tx.objectStore('cellLines'); if (!c.indexNames.contains('profileId')) c.createIndex('profileId', 'profileId', { unique: false }); } catch (_) {}
+      if (database.objectStoreNames.contains('profiles')) {
+        const first = tx.objectStore('profiles').openCursor();
+        first.onsuccess = () => {
+          if (!first.result) return;
+          const old = first.result.value;
+          settings.put({
+            deadLevel: old.deadLevel, sensitivity: old.sensitivity, concUnit: old.concUnit,
+            trypanPref: old.trypanPref, dilutionPref: old.dilutionPref,
+            lastUsedCount: old.recentCounts?.find(n => Number.isSafeInteger(n) && n > 0)
+          }, 'workspace');
+        };
       }
-      if (!d.objectStoreNames.contains('labels')) {
-        const l = d.createObjectStore('labels', { keyPath: 'id', autoIncrement: true });
-        l.createIndex('cellLineId', 'cellLineId', { unique: false });
-      } else {                                   // harden: older 'labels' stores were created without this index
-        try { const l = tx.objectStore('labels'); if (!l.indexNames.contains('cellLineId')) l.createIndex('cellLineId', 'cellLineId', { unique: false }); } catch (_) {}
-      }
+    };
+    req.onblocked = () => {
+      document.getElementById('stainPanel').disabled = false;
+      sampleSummary.textContent = 'Close other Cell Counter tabs to finish updating saved sessions.';
     };
     req.onsuccess = () => res(req.result);
     req.onerror = () => rej(req.error);
@@ -1969,91 +1630,46 @@ function openDB() {
 const oStore = (n, m) => db.transaction(n, m).objectStore(n);
 const pAll = (n) => new Promise((res, rej) => { const r = oStore(n, 'readonly').getAll(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); });
 const pAdd = (n, rec) => new Promise((res, rej) => { const r = oStore(n, 'readwrite').add(rec); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-const pPut = (n, rec) => new Promise((res, rej) => { const r = oStore(n, 'readwrite').put(rec); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+function putRecord(store, value, key) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(value, key);
+    tx.oncomplete = resolve;
+    tx.onabort = () => reject(tx.error);
+  });
+}
 const pDelete = (n, id) => new Promise((res, rej) => { const r = oStore(n, 'readwrite').delete(id); r.onsuccess = () => res(); r.onerror = () => rej(r.error); });
 const pGet = (n, id) => new Promise((res, rej) => { const r = oStore(n, 'readonly').get(id); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 const pByIndex = (store, idx, val) => new Promise((res, rej) => { const r = oStore(store, 'readonly').index(idx).getAll(IDBKeyRange.only(val)); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); });
-const pByProfile = (store, pid) => pByIndex(store, 'profileId', pid);
-function pAddMany(store, recs) {
-  return new Promise((res, rej) => {
-    if (!recs.length) return res();
-    const tx = db.transaction(store, 'readwrite'), os = tx.objectStore(store);
-    recs.forEach((r) => os.add(r));
-    tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
-  });
-}
-
-async function populateProfiles(selectId) {
-  const profiles = await pAll('profiles');
-  profileSelect.innerHTML = '';
-  profiles.forEach((p) => { const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; profileSelect.appendChild(o); });
-  activeProfileId = selectId || (profiles[0] && profiles[0].id) || null;
-  if (activeProfileId != null) profileSelect.value = activeProfileId;
-  if (deleteProfileBtn) deleteProfileBtn.disabled = !(storageOK && profiles.length > 1);   // keep at least one profile
-  await loadProfilePref();
-  activeCellLineId = null;                    // cell lines are per-profile; reset on profile load
-  await loadCellLines();
-  await loadLabels();
-  await startNewSession();
-}
-// delete the active profile and EVERYTHING under it (its squares, cell lines, labels)
-async function deleteProfile() {
-  if (!storageOK || activeProfileId == null) return;
-  const profiles = await pAll('profiles');
-  if (profiles.length <= 1) { alert('This is your only profile — create another one before deleting this.'); return; }
-  const nm = (profiles.find((p) => p.id === Number(activeProfileId)) || {}).name || 'this profile';
-  if (!confirm(`Delete profile "${nm}" and all of its saved squares and cell lines? This cannot be undone.`)) return;
-  const gone = Number(activeProfileId);
-  try {
-    const sq = await pByProfile('squares', gone);
-    for (const s of sq) { try { await pDelete('squares', s.id); } catch (_) {} }
-    const cls = await pByIndex('cellLines', 'profileId', gone);
-    for (const cl of cls) { await deleteLineCascade(cl.id); }
-    await pDelete('profiles', gone);
-    dlog(`deleted profile ${gone} (+${sq.length} squares, +${cls.length} cell lines)`);
-  } catch (e) { dlog('delete profile failed: ' + e.message); }
-  deletedStack = [];
-  await populateProfiles();          // falls back to the first remaining profile
-}
-// per-profile preferences: dead (blue) sensitivity 1..10 + detection sensitivity + unit + recent counts
-async function loadProfilePref() {
-  try {
-    const p = await pGet('profiles', Number(activeProfileId));
-    if (p && typeof p.deadLevel === 'number') deadLevel = clamp(p.deadLevel, 1, 10);
-    else if (p && typeof p.blueThresh === 'number') deadLevel = 5;   // legacy absolute -> default strictness
-    else deadLevel = 5;
-    sensitivity = (p && typeof p.sensitivity === 'number') ? p.sensitivity : 5;
-    concUnit = (p && p.concUnit === 'uL') ? 'uL' : 'mL';
-    trypanOn = (p && typeof p.trypanPref === 'boolean') ? p.trypanPref : true;                       // remembered Trypan choice
-    dilution = (p && typeof p.dilutionPref === 'number' && p.dilutionPref >= 1) ? p.dilutionPref : 2; // remembered dilution
-    profileRecentCounts = (p && Array.isArray(p.recentCounts)) ? p.recentCounts.filter((n) => isFinite(n) && n > 0).slice(0, 8) : [];
-  } catch (_) { deadLevel = 5; sensitivity = 5; concUnit = 'mL'; trypanOn = true; dilution = 2; profileRecentCounts = []; }
-  if (blueSlider) blueSlider.value = deadLevel;
-  if (blueLabel) blueLabel.textContent = deadLevel;
-  if (sensSlider) sensSlider.value = sensitivity;
-  if (sensLabel) sensLabel.textContent = sensitivity;
-  if (concMlBtn) concMlBtn.classList.toggle('active', concUnit === 'mL');
-  if (concUlBtn) concUlBtn.classList.toggle('active', concUnit === 'uL');
-  if (dilutionInput) dilutionInput.value = String(dilution);
-  if (trypanYes) trypanYes.classList.toggle('active', trypanOn);
-  if (trypanNo) trypanNo.classList.toggle('active', !trypanOn);
+function applyPreferences(settings = {}) {
+  const p = settings || {};
+  deadLevel = Number.isFinite(p.deadLevel) ? clamp(p.deadLevel, 1, 10) : 5;
+  sensitivity = Number.isFinite(p.sensitivity) ? clamp(p.sensitivity, 1, 10) : 5;
+  concUnit = p.concUnit === 'uL' ? 'uL' : 'mL';
+  trypanOn = typeof p.trypanPref === 'boolean' ? p.trypanPref : true;
+  dilution = Number.isFinite(p.dilutionPref) && p.dilutionPref >= 1 ? p.dilutionPref : (trypanOn ? 2 : 1);
+  lastUsedCount = Number.isSafeInteger(p.lastUsedCount) && p.lastUsedCount > 0 ? p.lastUsedCount : null;
+  blueSlider.value = blueLabel.textContent = deadLevel;
+  sensSlider.value = sensLabel.textContent = sensitivity;
+  dilutionInput.value = String(dilution);
+  concMlBtn.classList.toggle('active', concUnit === 'mL');
+  concUlBtn.classList.toggle('active', concUnit === 'uL');
+  applyTrypan();
+  updateToolsVisibility();
   renderCalcRecent();
 }
-async function saveProfilePref() {
-  if (!storageOK || activeProfileId == null) return;
-  try {
-    const p = await pGet('profiles', Number(activeProfileId));
-    if (!p) return;
-    p.deadLevel = deadLevel; p.sensitivity = sensitivity; p.concUnit = concUnit;
-    p.trypanPref = trypanOn; p.dilutionPref = dilution;   // remember Trypan + dilution per profile
-    await pPut('profiles', p);
-  } catch (e) { dlog('pref save failed: ' + e.message); }
-}
-async function startNewSession() {
+async function savePreferences() {
   if (!storageOK) return;
-  currentSampleId = Date.now();
+  try {
+    await putRecord('settings', {deadLevel, sensitivity, concUnit, trypanPref:trypanOn,
+      dilutionPref:dilution, lastUsedCount}, 'workspace');
+  } catch (e) { dlog('Could not save preferences: '+e.message); }
+}
+async function startNewSession(previous = null) {
+  currentSessionKey = Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-');
+  sessionSquares = [];
   savedThisCount = false; deletedStack = [];
-  prevSampleId = null;                       // cleared here; the New-session button sets it so Undo can step back
+  previousSessionKey = previous;
   await refreshSampleView();
   await refreshHistory();
   updateUndoSessionButton();
@@ -2070,10 +1686,12 @@ function concPerML(arr) {
 async function refreshSampleView() {
   if (!storageOK) return;
   let rows = [];
-  try { rows = await pByProfile('squares', Number(activeProfileId)); } catch (e) { dlog('sample view failed: ' + e.message); rows = []; }
-  const all = rows.filter((s) => s && s.sampleId === currentSampleId).sort((a, b) => a.createdAt - b.createdAt);
+  const key = currentSessionKey;
+  try { rows = await pByIndex('squares', 'sessionKey', key); } catch (e) { dlog('sample view failed: ' + e.message); rows = []; }
+  if (key !== currentSessionKey) return;
+  const all = rows.sort((a, b) => a.createdAt - b.createdAt);
   document.getElementById('squareTally').textContent=all.length+' square'+(all.length===1?'':'s');
-  document.getElementById('session').dataset.empty=String(all.length===0 && prevSampleId==null && !deletedStack.length);
+  document.getElementById('session').dataset.empty=String(all.length===0 && previousSessionKey==null && !deletedStack.length);
   sampleList.innerHTML = '';
   all.forEach((s, i) => {
     const row = document.createElement('div'); row.className = 'sample-item';
@@ -2117,8 +1735,7 @@ async function doUndo() {
   if (!deletedStack.length) return;
   const d = deletedStack.pop(); updateUndoButton();
   try {
-    await pAdd('squares', { profileId: d.profileId, sampleId: d.sampleId, createdAt: d.createdAt,
-      total: d.total, live: d.live, dead: d.dead, viability: d.viability, trypanOn: d.trypanOn, dilution: d.dilution, thumb: d.thumb });
+    await putRecord('squares', d);
     dlog('undo: square restored');
   } catch (e) { dlog('undo failed: ' + e.message); }
   await refreshSampleView(); await refreshHistory();
@@ -2129,14 +1746,14 @@ async function doUndo() {
    stay in history), so undo simply re-selects the previous session. */
 function updateUndoSessionButton() {
   if (!undoSessionBtn) return;
-  const can = storageOK && prevSampleId != null && prevSampleId !== currentSampleId;
+  const can = storageOK && previousSessionKey != null && previousSessionKey !== currentSessionKey;
   undoSessionBtn.style.display = can ? '' : 'none';
   if (can) document.getElementById('session').dataset.empty='false';
 }
 async function undoNewSession() {
-  if (prevSampleId == null) return;
-  currentSampleId = prevSampleId;
-  prevSampleId = null;
+  if (previousSessionKey == null) return;
+  currentSessionKey = previousSessionKey;
+  previousSessionKey = null;
   savedThisCount = false; deletedStack = [];
   await refreshSampleView(); await refreshHistory();
   updateUndoSessionButton();
@@ -2163,15 +1780,11 @@ function csvCell(v) {                                   // quote if needed (comm
   const s = String(v == null ? '' : v);
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
-async function exportSessionCsv() {
+function exportSessionCsv() {
   if (!storageOK) { saveStatus.textContent = 'storage unavailable'; return; }
-  let rows = [];
-  try { rows = await pByProfile('squares', Number(activeProfileId)); }
-  catch (e) { dlog('csv load failed: ' + e.message); saveStatus.textContent = 'export failed'; return; }
-  const all = rows.filter((s) => s && s.sampleId === currentSampleId).sort((a, b) => a.createdAt - b.createdAt);
+  const all = sessionSquares;
   if (!all.length) { saveStatus.textContent = 'no squares to export'; return; }
 
-  const profName = (profileSelect.options[profileSelect.selectedIndex] || {}).text || 'profile';
   const m = all.length;
   const avgTotal = all.reduce((a, s) => a + s.total, 0) / m;
   const anyTrypan = all.some((s) => s.trypanOn);
@@ -2180,7 +1793,6 @@ async function exportSessionCsv() {
 
   const L = [];
   L.push(['Cell Counter — session export']);
-  L.push(['Profile', profName]);
   L.push(['Exported', new Date().toLocaleString()]);
   L.push([]);
   L.push(['Square', 'Total', 'Live', 'Dead', 'Viability %', 'Trypan', 'Dilution', 'Conc cells/mL', 'Conc cells/uL', 'Counted at']);
@@ -2217,30 +1829,29 @@ function saveAnnotatedImage() {
     }, 'image/png');
   } catch (e) { dlog('image save failed: ' + e.message); setCountStatus('Could not save the image.'); }
 }
-// past sessions for this profile (everything except the current one)
-// FIX (Bug #1): legacy squares saved before sessions existed have no numeric
-// sampleId; skip them so grouping never yields groups[NaN] (which crashed init).
 async function refreshHistory() {
-  if (!storageOK || !historyList) return;
-  let sq = [];
-  try { sq = await pByProfile('squares', Number(activeProfileId)); } catch (e) { dlog('history load failed: ' + e.message); sq = []; }
-  const groups = {};
-  sq.forEach((s) => {
-    if (!s || typeof s.sampleId !== 'number' || !isFinite(s.sampleId)) return;   // skip legacy/orphan squares
-    (groups[s.sampleId] = groups[s.sampleId] || []).push(s);
-  });
-  const ids = Object.keys(groups).map(Number).filter((id) => id !== currentSampleId).sort((a, b) => b - a);
+  if (!storageOK) return;
+  const squares = await pAll('squares');
+  const groups = new Map();
+  for (const square of squares) {
+    if (square.sessionKey === currentSessionKey) continue;
+    if (!groups.has(square.sessionKey)) groups.set(square.sessionKey, []);
+    groups.get(square.sessionKey).push(square);
+  }
+  // getAll follows the primary key, but resumed sessions and restored rows
+  // need sorting by the original count time.
+  const sessions = [...groups.values()].map(rows => rows.sort((a,b)=>a.createdAt-b.createdAt))
+    .sort((a,b)=>b[0].createdAt-a[0].createdAt);
   historyList.innerHTML = '';
-  if (ids.length === 0) { historyList.innerHTML = '<p class="muted-line">No past sessions yet.</p>'; return; }
-  ids.forEach((id) => {
-    const arr = (groups[id] || []).slice().sort((a, b) => a.createdAt - b.createdAt), m = arr.length;
-    if (!m) return;
+  if (sessions.length === 0) { historyList.innerHTML = '<p class="muted-line">No past sessions yet.</p>'; return; }
+  sessions.forEach(arr => {
+    const id = arr[0].sessionKey, m = arr.length;
     const when = new Date(arr[0].createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const row = document.createElement('div'); row.className = 'sample-item';
     const span = document.createElement('span'); span.innerHTML = `${when} · ${m} sq · ≈ ${formatConc(concPerML(arr))}/mL`;
     const btn = document.createElement('button'); btn.className = 'mini-btn'; btn.textContent = 'Resume';
     btn.addEventListener('click', async () => {
-      currentSampleId = id; savedThisCount = false; deletedStack = []; prevSampleId = null;
+      currentSessionKey = id; savedThisCount = false; deletedStack = []; previousSessionKey = null;
       await refreshSampleView(); await refreshHistory(); updateUndoSessionButton();
       saveStatus.textContent = 'resumed a past session';
     });
@@ -2248,48 +1859,31 @@ async function refreshHistory() {
   });
 }
 function updateSaveButton() {
-  saveBtn.disabled = !(storageOK && hasCount && !savedThisCount);
+  saveBtn.disabled = !(storageOK && currentSessionKey && hasCount && !savedThisCount);
   saveBtn.textContent = savedThisCount ? 'Added to session ✓' : 'Add square to session';
 }
 async function initStorage() {
   try {
     db = await openDB();
-    const profiles = await pAll('profiles');
-    if (profiles.length === 0) await pAdd('profiles', { name: 'Default', createdAt: Date.now() });
+    db.onversionchange = () => db.close();
     storageOK = true;
-    await populateProfiles();
-    profileSelect.disabled = false; newProfileBtn.disabled = false;
-    if (celllineRow) celllineRow.style.display = '';
+    applyPreferences(await pGet('settings','workspace'));
+    await startNewSession();
     dlog('storage ready · fresh session');
   } catch (e) {
     console.error('storage init failed:', e); dlog('storage init FAILED: ' + e.message);
     storageOK = false;
+    applyPreferences();
     sampleSummary.textContent = '(on-device storage unavailable here)'; sampleSummary.style.display = 'block';
-    if (celllineRow) celllineRow.style.display = 'none';
   }
+  document.getElementById('stainPanel').disabled = false;
   updateSaveButton();
 }
-profileSelect.addEventListener('change', async () => {
-  activeProfileId = Number(profileSelect.value);
-  await loadProfilePref();
-  activeCellLineId = null;
-  await loadCellLines();
-  await loadLabels();
-  await startNewSession();
-});
-newProfileBtn.addEventListener('click', async () => {
-  const name = prompt('Name this equipment setup (e.g. "Scope A · 10x"):');
-  if (!name || !name.trim()) return;
-  const id = await pAdd('profiles', { name: name.trim(), createdAt: Date.now() });
-  await populateProfiles(id);
-});
-if (deleteProfileBtn) deleteProfileBtn.addEventListener('click', deleteProfile);
 newSessionBtn.addEventListener('click', async () => {
-  const before = currentSampleId;                 // remember so an accidental New session can be undone
-  await startNewSession();
-  prevSampleId = before;
-  updateUndoSessionButton();
-  saveStatus.textContent = 'new session';
+  const previous = sessionSquares.length ? currentSessionKey : null;
+  resetPhoto();
+  document.getElementById('historyBox').open = false;
+  await startNewSession(previous);
 });
 undoBtn.addEventListener('click', doUndo);
 if (undoSessionBtn) undoSessionBtn.addEventListener('click', undoNewSession);
@@ -2300,16 +1894,19 @@ saveBtn.addEventListener('click', async () => {
   if (!hasCount) { saveStatus.textContent = 'count a square first'; return; }
   if (savedThisCount || saveBtn.disabled) return;
   saveBtn.disabled=true;
+  const key = currentSessionKey, photo = img;
   try {
     const c = summarizeCounts();
     await pAdd('squares', {
-      profileId: Number(activeProfileId), sampleId: currentSampleId, createdAt: Date.now(),
+      sessionKey: key, createdAt: Date.now(),
       total: c.total, live: c.live, dead: c.dead, viability: c.viability,
       trypanOn, dilution, thumb: lastFlatClean
     });
+    if (key !== currentSessionKey || photo !== img) { await refreshHistory(); return; }
     savedThisCount = true;
     dlog(`added square: total ${c.total}, live ${c.live}, dead ${c.dead}, dil ${dilution}`);
     await refreshSampleView();
+    if (key !== currentSessionKey || photo !== img) return;
     saveStatus.textContent = '';
     document.querySelector('#changePhoto summary').textContent='Photo for next square';
     document.getElementById('changePhoto').open=true;
@@ -2323,6 +1920,7 @@ window.addEventListener('unhandledrejection', (e) => dlog('PROMISE REJECTED: ' +
 if (debugCopy) debugCopy.addEventListener('click', () => { if (navigator.clipboard) navigator.clipboard.writeText(_logLines.join('\n')); });
 if (debugClear) debugClear.addEventListener('click', () => { _logLines.length = 0; debugLog.textContent = ''; });
 
+applyPreferences();
 initStorage();
 /* The reference shows one entire corner square and the narrower neighboring rulings. */
 function drawGridReference() {

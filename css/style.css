@@ -45,7 +45,7 @@ h1 { font-size:clamp(2.5rem,5.7vw,4.9rem); line-height:1.03 }
 h1 span { color:#5a9163 }
 h2 { font-size:clamp(1.75rem,3vw,2.25rem); line-height:1.08 }
 .lead { font-size:clamp(1rem,1.7vw,1.12rem); max-width:33ch; line-height:1.55; margin:1.15rem 0 1.6rem; color:var(--muted) }
-.capture-row,.controls,.actions,.sample-actions,.profile-row,.save-row,.train-actions,.tool-group,.tools-row,.calc-row,.seg,.stepper { display:flex; align-items:center; flex-wrap:wrap; gap:9px }
+.capture-row,.controls,.actions,.sample-actions,.save-row,.tool-group,.tools-row,.calc-row,.seg,.stepper { display:flex; align-items:center; flex-wrap:wrap; gap:9px }
 .capture-row button { display:inline-flex; align-items:center; justify-content:center; gap:9px; min-height:48px; padding-inline:1.15rem }
 .camera-icon,.photo-icon { display:inline-block; height:14px; width:19px; border:1.7px solid; border-radius:3px; position:relative; }
 .camera-icon:before { content:""; position:absolute; top:-4px; left:4px; width:7px; height:3px; border:1.5px solid; border-bottom:0; border-radius:3px 3px 0 0; background:var(--green) }
@@ -59,14 +59,15 @@ h2 { font-size:clamp(1.75rem,3vw,2.25rem); line-height:1.08 }
 .diagram { display:flex; align-items:center; justify-content:center; }
 #guide { display:block; width:100%; height:auto }
 figcaption { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:4px 10px; padding:.7rem 1.15rem; border-top:1px solid #4c6b58; color:#eaf0df; font-size:.9rem }
-figcaption span,.meta,.section-head>span,.slider-val,.train-count,.manual-val { font: .83rem/1.5 "IBM Plex Mono",Consolas,monospace; font-variant-numeric:tabular-nums }
+figcaption span,.meta,.section-head>span,.slider-val,.manual-val { font: .83rem/1.5 "IBM Plex Mono",Consolas,monospace; font-variant-numeric:tabular-nums }
 .session-area { border-top:2px solid var(--ink); padding-top:1.25rem; margin-top:.5rem }
 .section-head,.stage-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:.6rem }
 .section-head>span { color:var(--muted) }
 .sample-summary,.readout,.calc-out { white-space:pre-line; line-height:1.6 }
 .sample-summary { color:var(--muted); margin:.85rem 0 1.15rem }
 .sample-actions { margin-bottom:1.2rem }
-.session-area[data-empty="true"] .sample-actions { display:none }
+body[data-stage="photo"] .session-area[data-empty="true"] .sample-actions { display:none }
+.session-area[data-empty="true"] #exportCsvBtn { display:none }
 .fold,.calc { border-top:1px solid var(--rule) }
 details>summary { padding:.8rem 1px; display:flex; align-items:center; justify-content:space-between; gap:1rem; font-weight:600; min-height:48px; cursor:pointer; list-style:none }
 details>summary::-webkit-details-marker { display:none }
@@ -74,7 +75,7 @@ details>summary:after { content:""; width:7px; height:7px; border-right:1.5px so
 details[open]>summary:after { transform:rotate(225deg); margin-bottom:-.2rem }
 .debug { color:var(--muted); font-size:.875rem }
 .debug pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:200px; overflow:auto }
-.profile-row,.fold-body,.replace .capture-row,.debug .actions { padding:.5rem 0 1rem }
+.fold-body,.replace .capture-row,.debug .actions { padding:.5rem 0 1rem }
 select { appearance:none; padding-right:2rem; max-width:100%; background-image:linear-gradient(45deg,transparent 50%,#425d4d 51%),linear-gradient(135deg,#425d4d 50%,transparent 51%); background-size:5px 5px; background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%; background-repeat:no-repeat }
 .stage-panel { padding-bottom:1rem }
 .stage-head { margin:0 0 .9rem }
@@ -96,14 +97,14 @@ select { appearance:none; padding-right:2rem; max-width:100%; background-image:l
 .caption,.count-hint,.calc-help { font-size:.93rem; line-height:1.5 }
 .actions,.count-tools,.readout,.calc { margin-top:.8rem }
 .count-hint { color:#76511e; margin:.5rem 0 }
-.tool-group,.tools-row,.calc-row,.calc-recent,.train-actions { margin:.6rem 0 }
+.tool-group,.tools-row,.calc-row,.calc-recent { margin:.6rem 0 }
 .fold-body { padding-inline:3px }
 .tool-label { color:var(--muted); font-size:.93rem }
 .seg { gap:0; flex-wrap:nowrap }.seg button { border-radius:0; padding-inline:.8rem }.seg button+button { border-left:0 }
 .seg button:first-child { border-radius:5px 0 0 5px }.seg button:last-child { border-radius:0 5px 5px 0 }
 .num-input { width:5.25rem }.num-input.wide { width:9rem }.slider { accent-color:var(--green); max-width:100%; min-height:40px; flex:1 1 100px }
 .step-btn { min-width:44px }
-.train-bar,.calc-out { border-left:3px solid #709c71; padding:.65rem .85rem; background:#e7edde; margin:.8rem 0 }
+.calc-out { border-left:3px solid #709c71; padding:.65rem .85rem; background:#e7edde; margin:.8rem 0 }
 .calc-divider { border-top:1px solid var(--rule); margin:1rem 0 }.calc-sub { font-weight:600 }
 .sample-item { display:flex; align-items:center; justify-content:space-between; gap:.65rem; padding:.45rem 0; border-bottom:1px solid var(--rule) }
 .sample-item button { flex:none }.sample-list .muted-line { padding:.5rem 0 1rem }
@@ -132,6 +133,20 @@ input,button { touch-action:manipulation }
   .review-tools { min-width:0 }
 }
 @media (max-width:360px) { .bar { gap:6px }.bar nav { gap:.6rem }.brand { font-size:1rem; gap:6px }.capture-row button { padding-inline:.6rem } }
-#stainNote { margin-left:auto; font-size:.85rem; font-weight:normal; color:var(--muted) }
 .canvas-wrap { align-items:flex-start }
 #canvas { flex:none }
+
+.stain-panel { min-width:0; margin:0 0 1.15rem; padding:.65rem 0; border:0; border-block:1px solid var(--rule); display:flex; align-items:center; flex-wrap:wrap; gap:.2rem 1.5rem }
+.stain-panel .tools-row { gap:.4rem 1.2rem }
+.stain-panel .tools-row,.stain-panel .tool-group { margin:0 }
+.stain-panel .tool-label { color:var(--ink) }
+.stain-panel .slider-group { flex:1 1 250px; max-width:385px }
+.stain-panel .slider { min-width:70px }
+.quick-values { margin:.8rem 0 1.1rem }
+.calc-recent { display:flex; align-items:center; flex-wrap:wrap; gap:.4rem }
+.chip small { margin-left:.45em; color:var(--muted); font-size:.8rem; font-weight:500 }
+@media(max-width:460px) {
+  .stain-panel .tools-row { width:100%; justify-content:space-between }
+  .stain-panel .num-input { width:4rem }
+  .stain-panel .seg button { padding-inline:.65rem }
+}
