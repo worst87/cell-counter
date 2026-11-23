@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f5f6f0">
   <title>Cell Counter · Hemocytometer workspace</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="css/style.css?v=2">
+  <link rel="stylesheet" href="css/style.css?v=3">
 </head>
 <body data-stage="photo">
   <header class="mast"><div class="bar">
@@ -30,7 +30,7 @@
         <figcaption><strong>Counting square</strong><span>4 × 4 subdivisions</span></figcaption>
       </figure>
     </section>
-    <fieldset class="stain-panel" id="stainPanel" aria-label="Sample staining" disabled>
+    <fieldset class="stain-panel" id="stainPanel" aria-label="Staining and detection" disabled>
         <div class="tools-row">
           <div class="tool-group">
             <span class="tool-label">Trypan blue</span>
@@ -45,11 +45,19 @@
           </div>
         </div>
 
+      <div class="sensitivity-controls">
+        <div class="tool-group slider-group" id="sensGroup">
+          <label class="tool-label" for="sensSlider">Detection sensitivity</label>
+          <input id="sensSlider" aria-describedby="sensitivityNote" class="slider" type="range" min="1" max="10" step="1" value="5" />
+          <span class="slider-val" id="sensLabel">5</span>
+        </div>
         <div class="tool-group slider-group" id="sliderGroup">
           <label class="tool-label" for="blueSlider">Blue stain sensitivity</label>
           <input id="blueSlider" class="slider" type="range" min="1" max="10" step="1" value="5" />
           <span class="slider-val" id="blueLabel">5</span>
         </div>
+        <p id="sensitivityNote" class="caption">Changing detection sensitivity recounts the square and clears manual edits.</p>
+      </div>
     </fieldset>
     <p id="photoError" role="alert" hidden></p>
     <section id="boundary" class="stage-panel" hidden aria-labelledby="boundaryTitle">
@@ -80,12 +88,7 @@
         <div class="tool-group"><label class="tool-label" for="cellContrast">Cell appearance</label>
           <select id="cellContrast"><option value="auto">Automatic</option><option value="bright">Bright on dark</option><option value="dark">Dark on light</option></select>
         </div>
-        <div class="tool-group slider-group" id="sensGroup">
-          <label class="tool-label" for="sensSlider">Detection sensitivity</label>
-          <input id="sensSlider" class="slider" type="range" min="1" max="10" step="1" value="5" />
-          <span class="slider-val" id="sensLabel">5</span>
-        </div>
-        <p class="caption">Changing appearance or detection sensitivity recounts the square and clears manual edits.</p>
+        <p class="caption">Changing cell appearance recounts the square and clears manual edits.</p>
 
         <div class="tool-group manual-row" id="manualRow">
           <span class="tool-label">Adjust count</span>
@@ -128,23 +131,6 @@
           <input id="calcFinal" class="num-input" type="number" inputmode="decimal" min="0" step="0.1" placeholder="—" />
         </div>
         <p class="calc-out" id="calcOut"></p>
-
-        <div class="calc-divider"></div>
-        <p class="calc-sub">Limiting dilution (single-cell cloning)</p>
-        <p class="calc-help">Dilute the stock so each well gets about one cell — for cloning. Uses the measured stock concentration above.</p>
-        <div class="calc-row">
-          <label class="tool-label" for="ldCells">Cells per well</label>
-          <input id="ldCells" class="num-input" type="number" inputmode="decimal" min="0" step="0.1" value="0.5" />
-        </div>
-        <div class="calc-row">
-          <label class="tool-label" for="ldVol">Well volume (µL)</label>
-          <input id="ldVol" class="num-input" type="number" inputmode="decimal" min="0" step="10" value="100" />
-        </div>
-        <div class="calc-row">
-          <label class="tool-label" for="ldWells">Number of wells</label>
-          <input id="ldWells" class="num-input" type="number" inputmode="numeric" min="1" step="1" value="96" />
-        </div>
-        <p class="calc-out" id="ldOut"></p>
       </details>
     
     </section>
@@ -158,5 +144,5 @@
     <details class="fold debug" id="debugBox"><summary>Debug log</summary><pre id="debugLog"></pre><div class="actions"><button id="debugCopy">Copy log</button><button id="debugClear">Clear</button></div></details>
   </main>
   <div class="busy" id="busy" role="status" hidden><div><i class="spinner"></i><span id="busyMsg">Processing…</span></div></div>
-  <script src="js/grid.js"></script><script src="js/app.js?v=2"></script>
+  <script src="js/grid.js"></script><script src="js/app.js?v=3"></script>
 </body></html>
