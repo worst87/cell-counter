@@ -1,7 +1,5 @@
 /* ===========================================================================
-   Cell Counter — app logic   (v8: lattice grid-fitting + confidence, tap-4-corners,
-   box memory, editable saved squares, warned session clearing, offline cache)
-   (v7: boundary-clamp + reset, reliability hint,
+   Cell Counter — app logic   (v7: boundary-clamp + reset, reliability hint,
    per-profile Trypan/dilution memory, limiting-dilution calc, faster CV)
    Phase 1 (boundary) + 1.5 (storage/profiles) + 2 (count + correct + Trypan)
    + Phase 3 (named per-profile CELL-LINE classifiers + Training mode)
@@ -98,26 +96,6 @@ const ldCells      = document.getElementById('ldCells');
 const ldVol        = document.getElementById('ldVol');
 const ldWells      = document.getElementById('ldWells');
 const ldOut        = document.getElementById('ldOut');
-// v8 — grid confidence, tap-4-corners, box memory, clearer session panel, square editing
-const detectText   = document.getElementById('detectText');
-const gridConfEl   = document.getElementById('gridConf');
-const tapCornersBtn= document.getElementById('tapCornersBtn');
-const tapActions   = document.getElementById('tapActions');
-const tapPrompt    = document.getElementById('tapPrompt');
-const tapUndoBtn   = document.getElementById('tapUndo');
-const tapCancelBtn = document.getElementById('tapCancel');
-const lastBoxBtn   = document.getElementById('lastBoxBtn');
-const nextSquareBtn= document.getElementById('nextSquareBtn');
-const clearSessionBtn = document.getElementById('clearSessionBtn');
-const sessionDilRow = document.getElementById('sessionDilRow');
-const sessionDilInput = document.getElementById('sessionDilInput');
-const sessionDilApply = document.getElementById('sessionDilApply');
-
-// Create the flattened-square context ONCE with willReadFrequently: every count reads it back with
-// getImageData, and without this hint browsers keep the canvas GPU-side and pay a readback each time.
-// cv.imshow() later calls getContext('2d') too, but a canvas only ever has one 2D context, so it
-// inherits this one — the hint must therefore be set here, before the first imshow.
-const flatCtx = flatCanvas.getContext('2d', { willReadFrequently: true });
 
 /* ---- tiny debug log (defined EARLY so the OpenCV loader below can log during boot;
         the buffer used to live at the bottom, which caused a temporal-dead-zone crash
@@ -143,16 +121,6 @@ let flatCleanData = null;   // clean flattened pixels (ImageData) for re-render 
 let cells = [];             // detected cells on the flattened square (Phase 2)
 let overlayVisible = true;  // show/hide the rings + numbers (manual-count mode)
 let concUnit = 'mL';        // 'mL' or 'uL' — how the concentration readout is shown
-
-// v8 grid detection: the fitted lattice is drawn faintly so you can SEE what was found,
-// and its line intersections become extra (exact) snap targets.
-let gridLinesImg = null;    // { a:[line…], b:[line…] } in IMAGE px — each {nx,ny,c}
-let gridConfidence = 0;     // 0..1 — how well the chosen box sits on real grid lines
-// tap-the-four-corners mode (the reliable manual fallback when auto-detect picks the wrong square)
-let tapMode = false;
-let tapPts = [];            // corners tapped so far, in canvas px
-const TAP_ORDER = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
-let lastBoxNorm = null;     // last confirmed box as fractions of the photo (per profile)
 
 // crop / zoom mode (frame the big square in the photo, then zoom into it)
 let cropMode = false;
@@ -180,26 +148,78 @@ function hideBusy() { if (busy) busy.hidden = true; }
 /* ===========================================================================
    Load a photo (camera OR gallery)
    =========================================================================== */
-function handleFile(file) {
-  if (!file) return;
-  if (currentURL) URL.revokeObjectURL(currentURL);
-  currentURL = URL.createObjectURL(file);
-  showBusy('Opening the photo…');
-  const image = new Image();
-  image.onload = () => { try { loadPhoto(image); } finally { hideBusy(); } };
-  image.onerror = () => { hideBusy(); dlog('photo failed to decode'); setDetectStatus('That file could not be opened as a photo — try another one.'); };
-  image.src = currentURL;
+
+const boundaryPanel=document.getElementById('boundary');
+const photoError=document.getElementById('photoError');
+const cornerNames=['top left','top right','bottom right','bottom left'];
+let marking=false, marked=[], manualBoundary=false, visionStarted=false;
+let frameSquare=false;
+const fullPhotoBtn=document.getElementById('fullPhotoBtn');
+function frameBoundary() {
+  const wrap=canvas.parentElement;
+  wrap.style.height=''; canvas.style.marginTop='';
+  const ys=corners.map(p=>p.y);
+  const top=Math.min(...ys), bottom=Math.max(...ys), pad=Math.max(30,(bottom-top)*0.22);
+  const start=Math.max(0,top-pad), end=Math.min(canvas.height,bottom+pad);
+  const canFit=ys.length===4 && !marking && !cropMode && end-start<canvas.height*.83;
+  fullPhotoBtn.hidden=!canFit;
+  if (canFit && frameSquare) {
+    wrap.style.height=Math.ceil(end-start)+'px'; canvas.style.marginTop=-Math.floor(start)+'px';
+  }
+  fullPhotoBtn.textContent=frameSquare?'Full photo':'Fit square';
 }
-// BUG FIX: clear the input's value after reading it. Without this, picking the SAME file twice in a
-// row (very common — retake, or re-pick the last gallery shot) fires no 'change' event at all and the
-// app looks frozen.
-function onPickFile(e) { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleFile(f); }
-cameraInput.addEventListener('change',  onPickFile);
-galleryInput.addEventListener('change', onPickFile);
+fullPhotoBtn.addEventListener('click',()=>{frameSquare=!frameSquare;frameBoundary()});
+function setStage(stage) {
+  document.body.dataset.stage=stage;
+  document.querySelector('.intro').hidden=stage!=='photo';
+  boundaryPanel.hidden=stage!=='boundary';
+  flatSection.style.display=stage==='count'?'block':'none';
+  document.getElementById('changePhoto').hidden=stage==='photo';
+  document.getElementById('changePhoto').open=false;
+  document.querySelector('#changePhoto summary').textContent='Change photo';
+  document.querySelectorAll('.steps li').forEach((el,i)=>{
+    if (['photo','boundary','count'][i]===stage) el.setAttribute('aria-current','step');
+    else el.removeAttribute('aria-current');
+  });
+}
+function reportPhotoError(message) {
+  photoError.textContent=message;
+  photoError.hidden=!message;
+  if (message) photoError.scrollIntoView({block:'nearest'});
+}
+document.querySelectorAll('[data-pick]').forEach(button=>button.addEventListener('click',()=>{
+  (button.dataset.pick==='camera'?cameraInput:galleryInput).click();
+}));
+document.querySelector('a[href="#equipment"]').addEventListener('click',()=>{document.getElementById('equipment').open=true});
+function handleFile(event) {
+  const input=event.target, file=input.files[0];
+  if (!file) return;
+  input.value='';
+  reportPhotoError('');
+  showBusy('Opening photo…');
+  const url=URL.createObjectURL(file), image=new Image();
+  if (currentURL) URL.revokeObjectURL(currentURL);
+  currentURL=url;
+  image.onload=()=>{
+    if (currentURL!==url) return;
+    hideBusy();
+    loadPhoto(image);
+    if (!visionStarted) { visionStarted=true; loadOpenCv(); }
+  };
+  image.onerror=()=>{
+    if (currentURL===url) {
+      hideBusy();
+      URL.revokeObjectURL(url); currentURL=null;
+      reportPhotoError('This photo could not be opened. Choose a JPEG, PNG or another image supported by this browser.');
+    }
+  };
+  image.src=url;
+}
+cameraInput.addEventListener('change',handleFile);
+galleryInput.addEventListener('change',handleFile);
 
 function computeFitSize() {
   const maxW = canvas.parentElement.clientWidth;
-  _lastFitW = maxW;                        // baseline for the resize guard below
   const maxH = window.innerHeight * 0.70;
   const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
   return { w: Math.round(img.naturalWidth * scale), h: Math.round(img.naturalHeight * scale) };
@@ -210,10 +230,16 @@ function setCanvasSize(w, h) {
 }
 function loadPhoto(image) {
   img = image;
+  setStage('boundary');
+  marking=false; marked=[]; manualBoundary=false; activeCorner=-1;
+  cropMode=false; cropActive=null; cropActions.style.display='none';
+  snapTargetsImg=[]; resetBoxBtn.textContent='Mark four corners';
+  if (trainingMode) cancelTraining();
+  flattenBtn.disabled=true;
   const { w, h } = computeFitSize();
   setCanvasSize(w, h);
-  const ix = w * 0.15, iy = h * 0.15;
-  corners = [{ x: ix, y: iy }, { x: w - ix, y: iy }, { x: w - ix, y: h - iy }, { x: ix, y: h - iy }];
+  corners=[];
+  frameSquare=false; frameBoundary();
 
   canvas.style.display = 'block';
   meta.style.display = 'block';
@@ -226,11 +252,7 @@ function loadPhoto(image) {
   overlayVisible = true;
   hasCount = false; savedThisCount = false;
   manualLive = 0; manualDead = 0; manualMode = 'live';
-  gridLinesImg = null; gridConfidence = 0; snapTargetsImg = [];
-  if (tapMode) leaveTapMode();
-  updateLastBoxButton();
   showCountTools(false);
-  if (nextSquareBtn) nextSquareBtn.style.display = 'none';
   updateSaveButton();
   meta.textContent = `photo ${img.naturalWidth}\u00D7${img.naturalHeight}px`;
 
@@ -239,7 +261,7 @@ function loadPhoto(image) {
     showBusy('Finding the grid…');
     setTimeout(() => { try { analyzeAndDetect(); } finally { hideBusy(); } }, 30);
   } else {
-    setDetectStatus('Preparing detection…');
+    setDetectStatus('Loading the grid detector. You can mark the four corners now.');
   }
 }
 
@@ -251,10 +273,16 @@ function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-  if (cropMode) { drawCropOverlay(); return; }   // framing the square to zoom in
-
-  drawFittedLattice();                           // show what the detector actually found
-  if (tapMode) { drawTapOverlay(); return; }     // tapping the four corners yourself
+  if (cropMode) { drawCropOverlay(); return; }
+  if (marking) {
+    if (marked.length) {
+      ctx.beginPath(); marked.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+      ctx.strokeStyle='#e1ff7d'; ctx.lineWidth=2; ctx.stroke();
+      marked.forEach(p=>drawCorner(p,false));
+    }
+    return;
+  }
+  if (!corners.length) return;   // framing the square to zoom in
 
   ctx.beginPath();
   ctx.moveTo(corners[0].x, corners[0].y);
@@ -262,63 +290,14 @@ function draw() {
   ctx.lineTo(corners[2].x, corners[2].y);
   ctx.lineTo(corners[3].x, corners[3].y);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(47, 158, 143, 0.05)';
-  ctx.fill();
-  ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(47, 158, 143, 0.75)'; ctx.stroke();
+  ctx.strokeStyle='#142922'; ctx.lineWidth=4; ctx.stroke();
+  ctx.strokeStyle='#e6ff8a'; ctx.lineWidth=2; ctx.stroke();
+  ctx.rect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='rgba(9,21,16,0.28)'; ctx.fill('evenodd');
 
   for (let i = 0; i < corners.length; i++) drawCorner(corners[i], i === activeCorner && snappedNow);
   if (activeCorner !== -1) drawLoupe(corners[activeCorner]);
 }
-/* The grid lines the detector fitted, drawn faintly. This is the difference between "it
-   failed and I don't know why" and "ah, it locked onto the wrong lines" — and it makes the
-   snap targets visible, so you can see where a corner will land before you drag it. */
-function drawFittedLattice() {
-  if (!gridLinesImg || !img) return;
-  const s = canvas.width / img.naturalWidth;
-  ctx.save();
-  ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(120, 220, 255, 0.30)';
-  const W = canvas.width, H = canvas.height;
-  for (const fam of [gridLinesImg.a, gridLinesImg.b]) {
-    for (const L of fam) {
-      // clip the infinite line nx*x + ny*y = c to the canvas box (in canvas px)
-      const c = L.c * s;
-      const pts = [];
-      if (Math.abs(L.ny) > 1e-6) { pts.push({ x: 0, y: (c - L.nx * 0) / L.ny }, { x: W, y: (c - L.nx * W) / L.ny }); }
-      if (Math.abs(L.nx) > 1e-6) { pts.push({ x: (c - L.ny * 0) / L.nx, y: 0 }, { x: (c - L.ny * H) / L.nx, y: H }); }
-      const inside = pts.filter((p) => p.x >= -1 && p.x <= W + 1 && p.y >= -1 && p.y <= H + 1);
-      if (inside.length < 2) continue;
-      ctx.beginPath(); ctx.moveTo(inside[0].x, inside[0].y); ctx.lineTo(inside[1].x, inside[1].y); ctx.stroke();
-    }
-  }
-  ctx.restore();
-}
-/* Tap-4-corners: dim the photo, mark the taps so far, and show where the next one goes. */
-function drawTapOverlay() {
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  if (tapPts.length > 1) {
-    ctx.beginPath(); ctx.moveTo(tapPts[0].x, tapPts[0].y);
-    for (let i = 1; i < tapPts.length; i++) ctx.lineTo(tapPts[i].x, tapPts[i].y);
-    if (tapPts.length === 4) ctx.closePath();
-    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(47,158,143,0.95)'; ctx.stroke();
-  }
-  const s = img ? canvas.width / img.naturalWidth : 1;
-  for (const t of snapTargetsImg) {                    // where a tap will snap to
-    const px = t.x * s, py = t.y * s;
-    if (px < 0 || py < 0 || px > canvas.width || py > canvas.height) continue;
-    ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(80,230,140,0.55)'; ctx.fill();
-  }
-  ctx.font = 'bold 13px system-ui, -apple-system, sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  tapPts.forEach((p, i) => {
-    ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(47,158,143,0.9)'; ctx.fill();
-    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.stroke();
-    ctx.fillStyle = '#fff'; ctx.fillText(String(i + 1), p.x, p.y);
-  });
-}
-
 function drawCropOverlay() {
   const r = cropRect; if (!r) return;
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -337,12 +316,9 @@ function drawCropOverlay() {
 }
 function drawCorner(c, isSnapped) {
   ctx.beginPath(); ctx.arc(c.x, c.y, HANDLE_RADIUS, 0, Math.PI * 2);
-  ctx.fillStyle = isSnapped ? 'rgba(80, 230, 140, 0.65)' : 'rgba(47, 158, 143, 0.45)'; ctx.fill();
-  ctx.lineWidth = 1.5; ctx.strokeStyle = isSnapped ? 'rgba(140, 255, 190, 0.9)' : 'rgba(255, 255, 255, 0.55)'; ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(c.x - 5, c.y); ctx.lineTo(c.x + 5, c.y);
-  ctx.moveTo(c.x, c.y - 5); ctx.lineTo(c.x, c.y + 5);
-  ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255, 70, 70, 0.9)'; ctx.stroke();
+  ctx.fillStyle = isSnapped ? '#e6ff8a' : '#fff'; ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle='#173d2f'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(c.x,c.y,2.2,0,Math.PI*2); ctx.fillStyle='#173d2f'; ctx.fill();
 }
 function drawLoupe(corner) {
   const R = LOUPE_RADIUS, M = LOUPE_ZOOM;
@@ -392,34 +368,62 @@ function getCanvasPoint(event) {
 // BUG FIX: after auto-detect, a detected (or edge-snapped) corner could land outside the
 // picture and become impossible to drag. Clamp every corner into a touchable inset.
 function clampCornerToCanvas(c) {
-  const m = HANDLE_RADIUS + 4;
-  return { x: clamp(c.x, m, canvas.width - m), y: clamp(c.y, m, canvas.height - m) };
+  return {x:clamp(c.x,0,canvas.width),y:clamp(c.y,0,canvas.height)};
+}
+function nearestCrossing(p, radius) {
+  const scale=canvas.width/img.naturalWidth;
+  let best=p, limit=radius;
+  for (const t of snapTargetsImg) {
+    const point={x:t.x*scale,y:t.y*scale},d=Math.hypot(p.x-point.x,p.y-point.y);
+    if (d<limit) { best=point; limit=d; }
+  }
+  return clampCornerToCanvas(best);
+}
+function updateBoundaryAction() {
+  const valid=!marking && ChamberGrid.validCorners(corners,Math.min(24,canvas.width*.09));
+  flattenBtn.disabled=!cvReady || !valid;
+  return valid;
+}
+function markNext(p) {
+  manualBoundary=true;
+  marked.push(nearestCrossing(p,8));
+  if (marked.length===4) {
+    if (ChamberGrid.validCorners(marked,Math.min(24,canvas.width*.09))) {
+      corners=marked.slice(); marking=false; marked=[];
+      resetBoxBtn.textContent='Mark four corners';
+      frameBoundary();
+      setDetectStatus('Check the outline around all 16 subdivisions. Drag any corner to adjust it.');
+    } else {
+      marked=[]; setDetectStatus('The corners crossed or were too close. Start again at the top left.');
+    }
+  } else setDetectStatus('Tap the '+cornerNames[marked.length]+' corner ('+(marked.length+1)+' of 4).');
+  updateBoundaryAction(); draw();
 }
 canvas.addEventListener('pointerdown', (event) => {
   if (event.pointerType === 'touch' && !event.isPrimary) return;   // let 2-finger pinch zoom the photo
   const p = getCanvasPoint(event);
-  if (tapMode) { addTapCorner(p); return; }
   if (cropMode) { cropPointerDown(p, event); return; }
+  if (marking) { markNext(p); return; }
   for (let i = 0; i < corners.length; i++) {
     if (Math.hypot(p.x - corners[i].x, p.y - corners[i].y) <= GRAB_RADIUS) {
-      activeCorner = i; snappedNow = false; canvas.setPointerCapture(event.pointerId); draw(); break;
+      activeCorner = i; manualBoundary=true; snappedNow = false; canvas.setPointerCapture(event.pointerId); draw(); break;
     }
   }
 });
 canvas.addEventListener('pointermove', (event) => {
-  if (tapMode) return;
   const p = getCanvasPoint(event);
   if (cropMode) { cropPointerMove(p); return; }
   if (activeCorner === -1) return;
   let rx = Math.max(0, Math.min(canvas.width, p.x)), ry = Math.max(0, Math.min(canvas.height, p.y));
   const s = canvas.width / img.naturalWidth;
-  let best = null, bestD = SNAP_RADIUS;
+  let best = null, bestD = Math.min(SNAP_RADIUS,canvas.width*0.022);
   for (const t of snapTargetsImg) {
     const d = Math.hypot(rx - t.x * s, ry - t.y * s);
     if (d < bestD) { bestD = d; best = { x: t.x * s, y: t.y * s }; }
   }
   snappedNow = !!best;
   corners[activeCorner] = clampCornerToCanvas(best || { x: rx, y: ry });
+  updateBoundaryAction();
   draw();
 });
 function endDrag() { if (cropMode) { cropActive = null; return; } if (activeCorner === -1) return; activeCorner = -1; snappedNow = false; draw(); }
@@ -428,22 +432,16 @@ canvas.addEventListener('pointercancel', endDrag);
 // while actively dragging a corner or the crop box, stop the browser from panning the (zoomed) page
 canvas.addEventListener('touchmove', (e) => { if (activeCorner !== -1 || (cropMode && cropActive)) e.preventDefault(); }, { passive: false });
 
-// BUG FIX: on Android, scrolling shows/hides the URL bar, which fires `resize` with a changed
-// window height. The old handler re-fitted the canvas on every one of those, nudging the four
-// corners a pixel or two each time — the box visibly crept while you scrolled. Only re-fit when
-// the available WIDTH really changed (rotation / desktop resize), which is what the fit depends on.
-let _lastFitW = 0;
 window.addEventListener('resize', () => {
-  if (!img || cropMode) return;
-  const availW = canvas.parentElement.clientWidth;
-  if (Math.abs(availW - _lastFitW) < 2) return;
-  _lastFitW = availW;
+  if (!img || boundaryPanel.hidden) return;
   const oldW = canvas.width, oldH = canvas.height;
   const { w, h } = computeFitSize();
   const sx = w / oldW, sy = h / oldH;
   setCanvasSize(w, h);
   corners = corners.map((c) => clampCornerToCanvas({ x: c.x * sx, y: c.y * sy }));
-  tapPts = tapPts.map((p) => ({ x: p.x * sx, y: p.y * sy }));
+  marked=marked.map(p=>({x:p.x*sx,y:p.y*sy}));
+  if (cropMode && cropRect) cropRect={x:cropRect.x*sx,y:cropRect.y*sy,w:cropRect.w*sx,h:cropRect.h*sy};
+  frameBoundary();
   draw();
 });
 
@@ -451,10 +449,8 @@ window.addEventListener('resize', () => {
    Fixes "the square is too small to snap onto" when the photo was taken far away.
    The suggested box is auto-placed around the densest cluster of grid crossings. */
 function suggestCropRect() {
-  const s = canvas.width / img.naturalWidth;
   const xs = [], ys = [];
-  if (snapTargetsImg.length >= 4) { snapTargetsImg.forEach((t) => { xs.push(t.x * s); ys.push(t.y * s); }); }
-  else if (corners.length === 4) { corners.forEach((c) => { xs.push(c.x); ys.push(c.y); }); }
+  if (!marking && corners.length === 4) { corners.forEach((c) => { xs.push(c.x); ys.push(c.y); }); }
   if (xs.length) {
     let minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
     const mx = Math.max(24, (maxX - minX) * 0.18), my = Math.max(24, (maxY - minY) * 0.18);
@@ -467,8 +463,8 @@ function suggestCropRect() {
 }
 function enterCrop() {
   if (!img) return;
-  if (tapMode) leaveTapMode();
   cropMode = true; activeCorner = -1; cropActive = null;
+  frameBoundary();
   cropRect = suggestCropRect();
   controls.style.display = 'none';
   if (cropActions) cropActions.style.display = 'flex';
@@ -480,7 +476,7 @@ function leaveCrop() {
   controls.style.display = 'flex';
   if (cropActions) cropActions.style.display = 'none';
 }
-function cancelCrop() { leaveCrop(); draw(); }
+function cancelCrop() { leaveCrop(); frameBoundary(); detectStatus.style.display='block'; hideBusy(); draw(); }
 function cropPointerDown(p, event) {
   const r = cropRect; if (!r) return;
   const hs = { tl: { x: r.x, y: r.y }, tr: { x: r.x + r.w, y: r.y }, br: { x: r.x + r.w, y: r.y + r.h }, bl: { x: r.x, y: r.y + r.h } };
@@ -520,6 +516,7 @@ function confirmCrop() {
     const url = oc.toDataURL('image/jpeg', 0.92);
     const im = new Image();
     im.onload = () => { leaveCrop(); loadPhoto(im); };      // loadPhoto re-fits + re-detects the grid on the zoomed crop
+    im.onerror = () => { cancelCrop(); setDetectStatus('Could not crop this photo. Try a smaller frame.'); };
     im.src = url;
   } catch (e) { dlog('crop FAILED: ' + e.message); cancelCrop(); }
 }
@@ -567,7 +564,7 @@ const CV_SOURCES = [
 ];
 const CV_SOURCE_TIMEOUT = 45000;   // ms to wait on one source before trying the next
 
-(function loadOpenCv() {
+function loadOpenCv() {
   let sourceIdx = -1;
   let started = false;      // MODULARIZE factory already invoked for the current source
   let mod = null;           // a module object we're waiting on (poll re-checks mod.Mat)
@@ -580,9 +577,9 @@ const CV_SOURCE_TIMEOUT = 45000;   // ms to wait on one source before trying the
     clearTimeout(curTimer); clearTimeout(msgTimer);
     if (cvStatus) cvStatus.style.display = 'none';
     if (typeof cvRetryBtn !== 'undefined' && cvRetryBtn) cvRetryBtn.style.display = 'none';
-    if (flattenBtn) flattenBtn.disabled = false;
+    updateBoundaryAction();
     if (typeof dlog === 'function') dlog('OpenCV ready (' + (window.__cvSrc || '?') + ').');
-    if (img) { showBusy('Finding the grid…'); setTimeout(() => { try { analyzeAndDetect(); } finally { hideBusy(); } }, 30); }
+    if (img && !cropMode) { showBusy('Finding the grid…'); setTimeout(() => { try { analyzeAndDetect(); } finally { hideBusy(); } }, 30); }
   }
 
   // Resolve whatever shape this build hands us into a ready cv.Mat module.
@@ -592,7 +589,10 @@ const CV_SOURCE_TIMEOUT = 45000;   // ms to wait on one source before trying the
     if (!c) return;
     if (c.Mat) { onReady(c); return; }                       // already-initialised module
     if (typeof c.then === 'function') {                      // a Promise of the module
-      mod = mod || c; c.then(adopt).catch(() => {}); return;
+      if (mod === c) return;
+      mod = c;
+      c.then(value=>{ if (value && value.Mat) onReady(value); else if (value!==c) adopt(value); },()=>{});
+      return;
     }
     if (typeof c === 'function') {                           // a MODULARIZE factory -> CALL once
       if (started) return; started = true;
@@ -684,28 +684,13 @@ const CV_SOURCE_TIMEOUT = 45000;   // ms to wait on one source before trying the
   if (typeof cvRetryBtn !== 'undefined' && cvRetryBtn) cvRetryBtn.addEventListener('click', retry);
 
   tryNextSource();
-})();
+}
 
 /* ===========================================================================
    GRID ANALYSIS — line extraction (snap crossings) + top-hat detection
    =========================================================================== */
-function orderCorners(p) {
-  const bySum = [...p].sort((a, b) => (a.x + a.y) - (b.x + b.y));
-  const byDiff = [...p].sort((a, b) => (a.y - a.x) - (b.y - b.x));
-  return [bySum[0], byDiff[0], bySum[3], byDiff[3]];
-}
-function rotatedRectCorners(rr) {
-  const cx = rr.center.x, cy = rr.center.y, hw = rr.size.width / 2, hh = rr.size.height / 2;
-  const a = rr.angle * Math.PI / 180, cos = Math.cos(a), sin = Math.sin(a);
-  return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([dx, dy]) => ({ x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos }));
-}
-
-// PERF: read the photo into a Mat at a capped size so big phone photos stay fast and we
-// never allocate a huge full-res Mat. Returns { mat, scale } (scale = capped/natural, ≤1).
-// Mapping stays correct because callers express natural-image coords via img.naturalWidth,
-// NOT mat.cols — so the cap never changes the coordinate maths (see analyzeGrid's toImage).
-const DET_MAX = 1400;        // detection input cap (grid lines stay crisp at this size)
-const FLAT_SRC_MAX = 2400;   // flatten source cap (900px straightened output stays sharp)
+const DET_MAX = 1200;
+const FLAT_SRC_MAX = 2400;
 function imreadScaled(maxDim) {
   const nW = img.naturalWidth, nH = img.naturalHeight;
   const scale = Math.min(1, maxDim / Math.max(nW, nH));
@@ -717,704 +702,81 @@ function imreadScaled(maxDim) {
   return { mat: cv.imread(oc), scale };
 }
 
-/* ===========================================================================
-   LATTICE FITTING — the geometry behind "find the grid"
-   ---------------------------------------------------------------------------
-   WHY THIS REPLACED THE OLD DETECTOR. The old code extracted grid lines with a
-   strictly HORIZONTAL and a strictly VERTICAL structuring element, then took the
-   minAreaRect of the biggest blob. That fails in two ways on a real phone photo:
-
-     1) A photo is never perfectly square-on. Tilt the chamber by 5° and a purely
-        horizontal opening no longer sees a "horizontal" line at all, so whole
-        lines vanish from the mask.
-     2) minAreaRect returns a ROTATED RECTANGLE. A photo taken at an angle shows
-        the square as a TRAPEZOID (perspective), which no rectangle can match — so
-        the box always sat a little wrong even when the mask was perfect.
-     3) It used the EXTENT of everything grid-like. The neighbouring square's fine
-        ruling is grid-like too, so the box swallowed it and the counted area was
-        far bigger than one large square.
-
-   What happens instead, in order:
-     a) Threshold to a line mask (as before — top-hat kills the background).
-     b) HoughLinesP finds line SEGMENTS at whatever angle they happen to be.
-     c) Segments are split into the two families (the grid's two directions) by a
-        length-weighted angle histogram — no assumption of 0°/90°.
-     d) Segments of one physical line are clustered by perpendicular offset and
-        fitted with total least squares, giving accurate infinite lines.
-     e) In each family, the lines are sorted across the image and we look for the
-        longest run of EVENLY SPACED lines. That run is the counting grid; the
-        neighbouring fine ruling has its own, much tighter spacing and its own
-        (short) run, so it loses on span and is excluded. This is what stops the
-        box from swallowing the neighbouring square.
-     f) The run's outer lines intersect to give a true four-point QUADRILATERAL,
-        perspective and all.
-     g) Every candidate box (lattice, convex-hull quad, legacy rect) is scored by
-        how much of its perimeter actually lies on grid pixels — so we can tell
-        the user how confident we are instead of guessing silently.
-   =========================================================================== */
-
-// perpendicular distance-normalised line: nx*x + ny*y = c, with (nx,ny) a unit normal
-function fitLineTLS(pts) {                       // pts: [x, y, weight][]
-  let sw = 0, sx = 0, sy = 0;
-  for (const p of pts) { sw += p[2]; sx += p[0] * p[2]; sy += p[1] * p[2]; }
-  if (sw <= 0) return null;
-  const mx = sx / sw, my = sy / sw;
-  let sxx = 0, syy = 0, sxy = 0;
-  for (const p of pts) { const dx = p[0] - mx, dy = p[1] - my; sxx += p[2] * dx * dx; syy += p[2] * dy * dy; sxy += p[2] * dx * dy; }
-  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);            // direction of greatest spread
-  const dx = Math.cos(th), dy = Math.sin(th);
-  const nx = -dy, ny = dx;
-  return { nx, ny, c: nx * mx + ny * my, w: sw };
-}
-function lineIntersect(l1, l2) {
-  const det = l1.nx * l2.ny - l1.ny * l2.nx;
-  if (Math.abs(det) < 1e-9) return null;
-  return { x: (l1.c * l2.ny - l1.ny * l2.c) / det, y: (l1.nx * l2.c - l1.c * l2.nx) / det };
-}
-function angDiff(a, b) { const d = Math.abs(a - b) % Math.PI; return Math.min(d, Math.PI - d); }
-
-// Dominant grid orientation: a length-weighted histogram of segment angles folded into 0..90°,
-// so the two perpendicular families reinforce the SAME bin instead of competing.
-function dominantAngle(segs) {
-  const B = 90, h = new Float64Array(B);
-  for (const s of segs) {
-    let a = Math.atan2(s.y2 - s.y1, s.x2 - s.x1) * 180 / Math.PI;
-    a = ((a % 90) + 90) % 90;
-    h[Math.floor(a) % B] += s.len;
-  }
-  const sm = new Float64Array(B);                             // circular 5-bin triangular smooth
-  for (let i = 0; i < B; i++) { let v = 0; for (let k = -2; k <= 2; k++) v += h[(i + k + B) % B] * (3 - Math.abs(k)); sm[i] = v; }
-  let bi = 0; for (let i = 1; i < B; i++) if (sm[i] > sm[bi]) bi = i;
-  const l = sm[(bi + B - 1) % B], c = sm[bi], r = sm[(bi + 1) % B], den = l - 2 * c + r;
-  const off = den !== 0 ? clamp(0.5 * (l - r) / den, -1, 1) : 0;
-  return ((bi + 0.5 + off) % B) * Math.PI / 180;              // radians, 0..π/2
-}
-
-// Group the segments belonging to one family into distinct physical lines.
-function clusterFamily(segs, theta, tol) {
-  const nx = -Math.sin(theta), ny = Math.cos(theta);          // family normal
-  const items = segs.map((s) => ({ s, o: nx * (s.x1 + s.x2) / 2 + ny * (s.y1 + s.y2) / 2 }))
-                    .sort((a, b) => a.o - b.o);
-  const groups = [];
-  let cur = null;
-  for (const it of items) {
-    if (!cur || it.o - cur.last > tol) { cur = { pts: [], last: it.o }; groups.push(cur); }
-    cur.last = it.o;
-    cur.pts.push([it.s.x1, it.s.y1, it.s.len], [it.s.x2, it.s.y2, it.s.len]);
-  }
-  const lines = [];
-  for (const g of groups) {
-    const L = fitLineTLS(g.pts);
-    if (!L) continue;
-    if (L.nx * nx + L.ny * ny < 0) { L.nx = -L.nx; L.ny = -L.ny; L.c = -L.c; }   // consistent orientation
-    lines.push(L);
-  }
-  return lines.sort((a, b) => a.c - b.c);
-}
-
-// A drawn grid line is several pixels thick, and Hough happily reports a segment along each of its
-// edges — so one physical line arrives as two or three fitted lines a few px apart. Fold those back
-// together (weighted by how much line evidence each carries) before looking for spacing, or every
-// duplicate reads as a spurious extra division and breaks the run.
-function mergeCloseLines(lines, tol) {
-  if (lines.length < 2) return lines;
-  const out = [];
-  let cur = null;
-  for (const L of lines) {                      // already sorted by offset
-    if (cur && L.c - cur.c <= tol) {
-      const w = cur.w + L.w;
-      cur.nx = (cur.nx * cur.w + L.nx * L.w) / w;
-      cur.ny = (cur.ny * cur.w + L.ny * L.w) / w;
-      cur.c  = (cur.c  * cur.w + L.c  * L.w) / w;
-      cur.w = w;
-      const m = Math.hypot(cur.nx, cur.ny) || 1;
-      cur.nx /= m; cur.ny /= m; cur.c /= m;
-    } else { cur = { nx: L.nx, ny: L.ny, c: L.c, w: L.w }; out.push(cur); }
-  }
-  return out;
-}
-
-/* Find the counting square's ruling among all the lines of one family.
-   ---------------------------------------------------------------------
-   Grow arithmetic progressions: pick any two lines as the first step, then keep reaching for the
-   next line one spacing further on, letting the spacing drift a little each step so perspective
-   foreshortening is fine. Skipping over a stray line is allowed, which makes it far more robust
-   than demanding a strictly consecutive run.
-
-   The scoring is where the real work happens. A wide progression is good, more divisions is
-   slightly better — but INTRUDERS are heavily punished: a line of the same family that falls
-   strictly inside the block without being one of its divisions. That single rule is what stops the
-   box from swallowing the neighbouring square. A counting square is ruled uniformly all the way
-   across; the moment the box is drawn too wide, the neighbour's finer ruling shows up inside it,
-   and those intruders sink the score. */
-function bestProgression(cs) {
-  const n = cs.length;
-  if (n < 2) return null;
-  if (n === 2) return { i0: 0, i1: 1, gaps: 1, span: cs[1] - cs[0], score: cs[1] - cs[0], intruders: 0 };
-  let best = null;
-  for (let i = 0; i < n - 1; i++) {
-    for (let j = i + 1; j < n; j++) {
-      let gap = cs[j] - cs[i];
-      if (gap <= 0) continue;
-      const members = [i, j];
-      let prev = cs[j];
-      for (let guard = 0; guard < 64; guard++) {
-        const target = prev + gap;
-        // How far off a predicted line may sit. This is what perspective costs us: photographed at
-        // an angle, each division is up to a third wider than the one before it, so a tolerance of
-        // a third of a step is the minimum that survives a strongly keystoned photo. Being generous
-        // here is safe because the prefix scoring below throws away over-long chains anyway.
-        let k = -1, bd = gap * 0.33;
-        for (let m = 0; m < n; m++) {
-          if (cs[m] <= prev + gap * 0.35) continue;       // must genuinely advance a step
-          const d = Math.abs(cs[m] - target);
-          if (d < bd) { bd = d; k = m; }
-        }
-        if (k < 0) break;
-        gap = cs[k] - prev;                               // adopt the observed spacing (drift)
-        prev = cs[k]; members.push(k);
-      }
-      // Score EVERY prefix, not just the finished chain. Growth is greedy and cannot back off: once
-      // it steps past the edge of the square into the neighbour's ruling it keeps going, and the
-      // correct shorter answer — the same chain, stopped one step earlier — would never be
-      // considered. Because the offsets are sorted, every index skipped between two chosen members
-      // is by definition an intruder, so the penalty accumulates as we walk.
-      let intruders = 0;
-      for (let p = 1; p < members.length; p++) {
-        intruders += members[p] - members[p - 1] - 1;
-        const span = cs[members[p]] - cs[i];
-        if (span <= 0) continue;
-        const score = span * (1 + 0.05 * Math.min(p, 8)) / (1 + 1.5 * intruders);
-        if (!best || score > best.score) best = { i0: i, i1: members[p], gaps: p, span, score, intruders };
-      }
-    }
-  }
-  return best;
-}
-
-// How much of a candidate box's outline actually sits on grid pixels. This is the confidence
-// number the UI shows — a box floating in empty space scores near 0, the real square near 1.
-// Measured against the LINE-ONLY mask (see linesOnlyMask): measuring against the axis-aligned
-// masks made every tilted photo score near zero even when the box was exactly right.
-function quadEdgeCoverage(maskData, W, H, quad) {
-  const R = 2;                                  // px slack (the mask lines are a few px thick)
-  let hits = 0, total = 0;
-  for (let e = 0; e < 4; e++) {
-    const p = quad[e], q = quad[(e + 1) % 4];
-    const len = Math.hypot(q.x - p.x, q.y - p.y);
-    const n = Math.max(12, Math.min(160, Math.round(len / 3)));
-    for (let i = 0; i <= n; i++) {
-      const t = i / n, x = Math.round(p.x + (q.x - p.x) * t), y = Math.round(p.y + (q.y - p.y) * t);
-      total++;
-      let hit = false;
-      for (let dy = -R; dy <= R && !hit; dy++) for (let dx = -R; dx <= R && !hit; dx++) {
-        const xx = x + dx, yy = y + dy;
-        if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
-        if (maskData[yy * W + xx]) hit = true;
-      }
-      if (hit) hits++;
-    }
-  }
-  return total ? hits / total : 0;
-}
-function quadArea(q) {
-  let a = 0;
-  for (let i = 0; i < 4; i++) { const p = q[i], n = q[(i + 1) % 4]; a += p.x * n.y - n.x * p.y; }
-  return Math.abs(a) / 2;
-}
-// Reject nonsense before it reaches the user: too small, too thin, or self-crossing.
-function quadPlausible(q, W, H) {
-  if (!q || q.length !== 4 || q.some((p) => !p || !isFinite(p.x) || !isFinite(p.y))) return false;
-  const a = quadArea(q);
-  if (a < W * H * 0.03) return false;
-  const sides = [0, 1, 2, 3].map((i) => Math.hypot(q[(i + 1) % 4].x - q[i].x, q[(i + 1) % 4].y - q[i].y));
-  const mn = Math.min(...sides), mx = Math.max(...sides);
-  if (mn < Math.min(W, H) * 0.06) return false;
-  return mx / Math.max(mn, 1e-6) < 4.5;      // a counting square is never a long thin sliver
-}
-// Pull a corner onto the nearest real crossing, so the box lands exactly on the ruling.
-function snapQuadToCrossings(q, crossings, radius) {
-  return q.map((p) => {
-    let best = null, bd = radius;
-    for (const t of crossings) { const d = Math.hypot(p.x - t.x, p.y - t.y); if (d < bd) { bd = d; best = t; } }
-    return best ? { x: best.x, y: best.y } : p;
-  });
-}
-/* Keep the RULING, drop the CELLS — at any angle.
-   Cells are compact blobs; grid lines are long. Throwing away every connected component whose
-   bounding box is short in BOTH directions leaves the ruling untouched (the whole grid is one big
-   connected component) while removing the cells that would otherwise feed Hough hundreds of tiny
-   spurious segments. Unlike a horizontal/vertical morphological opening this doesn't care which
-   way the chamber was rotated, which is the whole point. */
-function linesOnlyMask(binD, minLen) {
-  let lbl = null, st = null, cn = null, out = null;
-  try {
-    lbl = new cv.Mat(); st = new cv.Mat(); cn = new cv.Mat();
-    const nL = cv.connectedComponentsWithStats(binD, lbl, st, cn, 8, cv.CV_32S);
-    const keep = new Uint8Array(nL);                    // label -> 255 if it is long enough to be a line
-    for (let i = 1; i < nL; i++) {
-      const w = st.intAt(i, 2), h = st.intAt(i, 3);     // CC_STAT_WIDTH / CC_STAT_HEIGHT
-      keep[i] = Math.max(w, h) >= minLen ? 255 : 0;
-    }
-    out = new cv.Mat(binD.rows, binD.cols, cv.CV_8UC1);
-    const ld = lbl.data32S, md = out.data;
-    for (let i = 0; i < ld.length; i++) md[i] = keep[ld[i]];
-    return out;
-  } catch (e) {
-    dlog('line-mask failed: ' + e.message);
-    if (out) { try { out.delete(); } catch (_) {} }
-    return null;
-  } finally { [lbl, st, cn].forEach((m) => { if (m) { try { m.delete(); } catch (_) {} } }); }
-}
-
-// Convex hull of a contour reduced to exactly four points (the classic document-scanner trick).
-// Unlike minAreaRect this CAN represent a perspective trapezoid.
-function quadFromContour(cnt) {
-  let hull = null, ap = null;
-  try {
-    hull = new cv.Mat(); cv.convexHull(cnt, hull, false, true);
-    const per = cv.arcLength(hull, true);
-    for (let e = 0.010; e <= 0.10; e += 0.005) {
-      ap = new cv.Mat();
-      cv.approxPolyDP(hull, ap, e * per, true);
-      if (ap.rows === 4) {
-        const pts = [];
-        for (let i = 0; i < 4; i++) pts.push({ x: ap.data32S[i * 2], y: ap.data32S[i * 2 + 1] });
-        ap.delete(); ap = null;
-        return orderCorners(pts);
-      }
-      ap.delete(); ap = null;
-    }
-    return null;
-  } catch (_) { return null; }
-  finally { [hull, ap].forEach((m) => { if (m) { try { m.delete(); } catch (_) {} } }); }
-}
-
-function analyzeGrid() {
-  const out = { snaps: [], detect: null, conf: 0, lines: null, gaps: null };
-  let src=null, work=null, gray=null, blur=null, kTop=null, tophat=null, bin=null, kSmall=null, binD=null,
-      hK=null, vK=null, hL=null, vL=null, gridD=null, inter=null, interD=null,
-      c1=null, h1=null, c2=null, h2=null, linesP=null, lineMask=null;
-  try {
-    src = imreadScaled(DET_MAX).mat;                 // PERF: cap the detection input size
-    const workW = Math.min(1100, src.cols), sd = workW / src.cols;
-    work = new cv.Mat();
-    cv.resize(src, work, new cv.Size(workW, Math.round(src.rows * sd)), 0, 0, cv.INTER_AREA);
-    // work is always a uniformly-scaled copy of the WHOLE photo, so work->natural = naturalWidth/W
-    // and work->canvas = canvas.width/W, regardless of the imread cap above.
-    const W = work.cols, H = work.rows, toCanvas = canvas.width / W, toImage = img.naturalWidth / W;
-
-    gray = new cv.Mat(); cv.cvtColor(work, gray, cv.COLOR_RGBA2GRAY);
-    // A light blur before thresholding. Photographing a MONITOR (which is how this rig works)
-    // produces moiré — fine interference stripes that Hough happily mistakes for grid lines.
-    // One 3x3 Gaussian removes them without softening a real ruling.
-    blur = new cv.Mat(); cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-
-    // TOP-HAT: keep thin bright structures (grid lines, cells), REMOVE big bright
-    // regions (the wall / equipment in the background).
-    kTop = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(25, 25));
-    tophat = new cv.Mat(); cv.morphologyEx(blur, tophat, cv.MORPH_TOPHAT, kTop);
-    bin = new cv.Mat(); cv.threshold(tophat, bin, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
-
-    kSmall = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-    binD = new cv.Mat(); cv.dilate(bin, binD, kSmall, new cv.Point(-1, -1), 1);
-
-    // Ruling only — cells removed, at whatever angle the chamber sits. Everything angle-agnostic
-    // (Hough, and the confidence score) works off this.
-    const compMin = Math.max(20, Math.round(Math.min(W, H) * 0.06));
-    lineMask = linesOnlyMask(binD, compMin) || binD;
-
-    // Axis-aligned line masks. These are still useful (they give the crossing blobs that corners
-    // snap to) but they are no longer what picks the box.
-    const len = Math.max(22, Math.round(W / 30));
-    hK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(len, 1));
-    vK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(1, len));
-    hL = new cv.Mat(); cv.morphologyEx(binD, hL, cv.MORPH_OPEN, hK);
-    vL = new cv.Mat(); cv.morphologyEx(binD, vL, cv.MORPH_OPEN, vK);
-
-    inter = new cv.Mat(); cv.bitwise_and(hL, vL, inter);   // crossings only
-
-    // SNAP TARGETS = centres of the crossing blobs
-    const crossW = [];                                     // crossings in WORK px (for corner snapping)
-    interD = new cv.Mat(); cv.dilate(inter, interD, kSmall, new cv.Point(-1, -1), 2);
-    c1 = new cv.MatVector(); h1 = new cv.Mat();
-    cv.findContours(interD, c1, h1, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-    for (let i = 0; i < c1.size(); i++) {
-      const c = c1.get(i);
-      // Use the blob CENTROID (image moments) rather than the bounding-box midpoint — it sits more
-      // exactly on the true line crossing when a crossing blob is slightly irregular/asymmetric.
-      let px, py;
-      const mm = cv.moments(c, false);
-      if (mm.m00 > 0) { px = mm.m10 / mm.m00; py = mm.m01 / mm.m00; }
-      else { const r = cv.boundingRect(c); px = r.x + r.width / 2; py = r.y + r.height / 2; }
-      c.delete();
-      crossW.push({ x: px, y: py });
-      out.snaps.push({ x: px * toImage, y: py * toImage });
-    }
-
-    /* ---- (b) line SEGMENTS at any angle ---- */
-    // Guarded: if a stripped OpenCV build ever lacks HoughLinesP we simply skip the lattice fit and
-    // fall through to the outline candidates below, rather than breaking detection outright.
-    const segs = [];
-    if (typeof cv.HoughLinesP === 'function') {
-      // Segments must be a decent fraction of the frame. Tried shorter (5%) to rescue photos taken
-      // from far away; it rescued those a little and broke two well-behaved cases outright, because
-      // short fragments fit spurious lines that split a run. A square too small to give 8%-of-frame
-      // segments is better served by Crop / zoom, which the status line now suggests.
-      const minLen = Math.max(18, Math.round(Math.min(W, H) * 0.08));
-      linesP = new cv.Mat();
-      cv.HoughLinesP(lineMask, linesP, 1, Math.PI / 360, Math.max(20, Math.round(minLen * 0.55)),
-                     minLen, Math.max(4, Math.round(Math.min(W, H) * 0.03)));
-      // Read by BUFFER LENGTH, not by rows. OpenCV.js builds disagree about the shape of this
-      // output — the docs.opencv.org build hands back an Nx1 Mat, the vendored @techstark build a
-      // 1xN one. Iterating `rows` silently found exactly one line on the latter (and cost an
-      // afternoon). data32S is always 4 ints per segment whichever way the Mat is shaped.
-      const nSeg = linesP.data32S ? (linesP.data32S.length / 4) | 0 : 0;
-      for (let i = 0; i < nSeg; i++) {
-        const x1 = linesP.data32S[i * 4], y1 = linesP.data32S[i * 4 + 1];
-        const x2 = linesP.data32S[i * 4 + 2], y2 = linesP.data32S[i * 4 + 3];
-        segs.push({ x1, y1, x2, y2, len: Math.hypot(x2 - x1, y2 - y1) });
-      }
-    }
-
-    /* ---- candidate boxes, all in WORK px ---- */
-    const gridData = lineMask.data;                        // CV_8UC1, row-major, continuous
-    const cands = [];
-    const addCand = (q, kind) => {
-      if (!quadPlausible(q, W, H)) return null;
-      const cov = quadEdgeCoverage(gridData, W, H, q);
-      const cand = { q, kind, cov };
-      cands.push(cand);
-      return cand;
-    };
-    let latticeCand = null;
-
-    if (segs.length >= 8) {
-      const theta = dominantAngle(segs);
-      const thA = theta, thB = theta + Math.PI / 2;
-      const famA = [], famB = [];
-      for (const s of segs) {
-        const a = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
-        (angDiff(a, thA) <= angDiff(a, thB) ? famA : famB).push(s);
-      }
-      const tol = Math.max(3, Math.round(W * 0.005));
-      const mergeTol = Math.max(5, W * 0.012);      // ~one line thickness; far below any real spacing
-      const linesA = mergeCloseLines(clusterFamily(famA, thA, tol), mergeTol);
-      const linesB = mergeCloseLines(clusterFamily(famB, thB, tol), mergeTol);
-      out.lines = {
-        a: linesA.map((L) => ({ nx: L.nx, ny: L.ny, c: L.c * toImage })),
-        b: linesB.map((L) => ({ nx: L.nx, ny: L.ny, c: L.c * toImage }))
-      };
-      if (linesA.length >= 2 && linesB.length >= 2) {
-        const runA = bestProgression(linesA.map((L) => L.c));
-        const runB = bestProgression(linesB.map((L) => L.c));
-        if (runA && runB) {
-          const a0 = linesA[runA.i0], a1 = linesA[runA.i1], b0 = linesB[runB.i0], b1 = linesB[runB.i1];
-          const raw = [lineIntersect(a0, b0), lineIntersect(a0, b1), lineIntersect(a1, b1), lineIntersect(a1, b0)];
-          if (raw.every(Boolean)) {
-            // Small snap radius: the intersection of two fitted lines is already sub-pixel accurate,
-            // so we only nudge it onto a crossing blob if one is essentially underneath it.
-            const q = snapQuadToCrossings(orderCorners(raw), crossW, Math.max(4, W * 0.01));
-            out.gaps = { a: runA.gaps, b: runB.gaps };
-            latticeCand = addCand(q, 'lattice');
-          }
-        }
-      }
-    }
-
-    // (fallbacks) outline of the connected grid mass — as a perspective quad, then as a rectangle
-    gridD = new cv.Mat(); cv.dilate(lineMask, gridD, kSmall, new cv.Point(-1, -1), 2);
-    c2 = new cv.MatVector(); h2 = new cv.Mat();
-    cv.findContours(gridD, c2, h2, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-    let bi = -1, ba = 0;
-    for (let i = 0; i < c2.size(); i++) { const c = c2.get(i); const a = cv.contourArea(c); c.delete(); if (a > ba) { ba = a; bi = i; } }
-    if (bi >= 0 && ba > W * H * 0.04) {
-      const c = c2.get(bi);
-      const hullQuad = quadFromContour(c);
-      if (hullQuad) addCand(snapQuadToCrossings(hullQuad, crossW, Math.max(6, W * 0.02)), 'hull');
-      const rr = cv.minAreaRect(c); c.delete();
-      addCand(orderCorners(rotatedRectCorners(rr)), 'rect');
-    }
-
-    if (cands.length) {
-      // The lattice fit is the principled answer — it is the only candidate that understands the
-      // grid is a REGULAR ruling rather than "some bright shape". So it wins whenever it is
-      // reasonably supported; the outline candidates are the safety net for when it isn't.
-      cands.sort((x, y) => y.cov - x.cov);
-      const win = (latticeCand && latticeCand.cov >= 0.55) ? latticeCand : cands[0];
-      out.detect = win.q.map((p) => ({ x: p.x * toCanvas, y: p.y * toCanvas }));
-      out.conf = win.cov;
-      out.kind = win.kind;
-      dlog(`grid: ${cands.length} candidate(s), picked ${win.kind} cov ${(win.cov * 100).toFixed(0)}%` +
-           (out.gaps ? ` (${out.gaps.b}×${out.gaps.a} divisions)` : ''));
-    }
-    return out;
-  } catch (e) {
-    console.error('grid analysis error:', e); dlog('grid analysis FAILED: ' + e.message); return out;
-  } finally {
-    if (lineMask === binD) lineMask = null;              // same Mat — don't double-free
-    [src, work, gray, blur, kTop, tophat, bin, kSmall, binD, hK, vK, hL, vL, gridD, inter, interD, c1, h1, c2, h2, linesP, lineMask]
-      .forEach((m) => { if (m) { try { m.delete(); } catch (_) {} } });
-  }
-}
-
-// The big square is a regular 4x4 grid, so true crossings are evenly spaced.
-// Drop isolated/spurious crossings (no neighbour within ~1.7x the median spacing)
-// for cleaner snapping. Falls back to the raw set if that would remove too many.
-function refineSnaps(pts) {
-  if (pts.length < 12) return pts;
-  const nn = pts.map((p, i) => {
-    let m = Infinity;
-    for (let j = 0; j < pts.length; j++) { if (j === i) continue; const d = Math.hypot(p.x - pts[j].x, p.y - pts[j].y); if (d < m) m = d; }
-    return m;
-  });
-  const sorted = [...nn].sort((a, b) => a - b);
-  const med = sorted[Math.floor(sorted.length / 2)];
-  if (!isFinite(med) || med <= 0) return pts;
-  const keep = pts.filter((_, i) => nn[i] <= med * 2.2);   // gentle: only drop clearly isolated outliers
-  return keep.length >= Math.max(8, pts.length * 0.5) ? keep : pts;
-}
-// Every fitted line crossing is also a snap target. These are EXACT (they come from two fitted
-// lines, not from a blob), and they exist even where the ruling is faint, broken, or hidden under
-// a clump of cells — which is exactly where the old blob-only targets used to disappear.
-function latticeCrossings(lines, limit) {
-  const out = [];
-  if (!lines || !lines.a || !lines.b) return out;
-  const A = lines.a, B = lines.b;
-  if (A.length * B.length > limit) return out;             // pathological image — don't blow up
-  for (const la of A) for (const lb of B) {
-    const p = lineIntersect(la, lb);
-    if (p && isFinite(p.x) && isFinite(p.y)) out.push(p);
-  }
-  return out;
-}
-function mergeSnapTargets(blobs, lattice, tol) {
-  const out = blobs.slice();
-  for (const p of lattice) {
-    let dup = false;
-    for (const q of blobs) { if (Math.abs(p.x - q.x) < tol && Math.abs(p.y - q.y) < tol) { dup = true; break; } }
-    if (!dup) out.push(p);
-  }
-  return out;
-}
-
 function analyzeAndDetect() {
   if (!cvReady || !img) return;
-  const res = analyzeGrid();
-  gridLinesImg = res.lines;
-  gridConfidence = res.conf || 0;
-  const nat = Math.max(img.naturalWidth, img.naturalHeight);
-  const lat = latticeCrossings(res.lines, 4000).filter(
-    (p) => p.x > -nat * 0.05 && p.y > -nat * 0.05 && p.x < img.naturalWidth * 1.05 && p.y < img.naturalHeight * 1.05);
-  snapTargetsImg = mergeSnapTargets(res.snaps, lat, nat * 0.006);
-  const refined = refineSnaps(res.snaps);           // pruned set only for seeding a sensible box
-  const seed = refined.length >= 4 ? refined : res.snaps;
-  const s = canvas.width / img.naturalWidth;
-  const divs = res.gaps ? ` (${res.gaps.b}×${res.gaps.a} divisions)` : '';
-
-  if (res.detect) {
-    corners = res.detect.map(clampCornerToCanvas);   // clamp so no corner lands off-screen
-    draw();
-    // Perimeter coverage alone can be misleading: a box drawn across only PART of the square still
-    // has all four edges sitting on real lines, and scores a confident-looking 100%. So also check
-    // the shape of the fit — a counting square is ruled into at least 3 equal divisions, the same
-    // number each way. A lopsided or too-coarse fit means lines were missed, and the user should
-    // be told to look rather than reassured.
-    let conf = gridConfidence;
-    if (res.gaps) {
-      const lo = Math.min(res.gaps.a, res.gaps.b), hi = Math.max(res.gaps.a, res.gaps.b);
-      if (lo < 3 || hi - lo > 1) conf = Math.min(conf, 0.5);
-    }
-    // A square that fills only a corner of the photo has few pixels to count cells in, whatever the
-    // box says. Crop / zoom genuinely fixes that, so point at it.
-    const areaFrac = quadArea(corners) / (canvas.width * canvas.height);
-    const zoomTip = areaFrac < 0.16
-      ? ' The square is small in this photo — tap <strong>Crop / zoom</strong> to zoom into it first for a better count.' : '';
-
-    if (conf >= 0.82) {
-      setDetectStatus(`Found the counting square${divs}. Check the four corners sit on the right square, then <strong>Flatten &amp; count</strong>.${zoomTip}`, 'high');
-    } else if (conf >= 0.55) {
-      setDetectStatus(`Found something grid-like${divs}, but I'm not certain it's the right square. Drag any corner that's off — corners snap to the crossings — or tap <strong>Tap 4 corners</strong>.${zoomTip}`, 'med');
+  let src;
+  try {
+    src=imreadScaled(DET_MAX).mat;
+    const result=ChamberGrid.detect(cv,src);
+    const toImage=img.naturalWidth/src.cols, toCanvas=canvas.width/src.cols;
+    snapTargetsImg=result.snaps.map(p=>({x:p.x*toImage,y:p.y*toImage}));
+    if (manualBoundary) { updateBoundaryAction(); return; }
+    if (result.corners) {
+      marking=false;
+      corners=result.corners.map(p=>({x:p.x*toCanvas,y:p.y*toCanvas}));
+      frameSquare=true; frameBoundary();
+      setDetectStatus('Check that the outline encloses all 16 subdivisions. Drag a corner if it needs adjusting.');
     } else {
-      setDetectStatus(`This looks like a partial fit${divs} — probably not the square you want. Tap <strong>Tap 4 corners</strong> and tap the four corners of the large square yourself; that always works.${zoomTip}`, 'low');
+      resetBox(result.ambiguous?'Several squares fit. ':'The outer boundary is unclear. ');
     }
-    gridConfidence = conf;
-  } else if (seed.length >= 4) {
-    const xs = seed.map((t) => t.x * s), ys = seed.map((t) => t.y * s);
-    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-    corners = [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }].map(clampCornerToCanvas);
-    draw();
-    setDetectStatus('I can see grid crossings but not a clean square. Drag the corners onto the large square, or tap <strong>Tap 4 corners</strong>.', 'low');
-  } else {
-    draw();
-    setDetectStatus('No grid found — the photo may be blurred, too dim, or too far away. Try <strong>Crop / zoom</strong>, or tap <strong>Tap 4 corners</strong> and place them yourself.', 'low');
-  }
-  updateLastBoxButton();
+  } catch (e) {
+    dlog('Grid detection failed: '+e);
+    if (!manualBoundary) resetBox('The grid could not be read. ');
+  } finally { if (src) src.delete(); updateBoundaryAction(); draw(); }
 }
-// level: 'high' | 'med' | 'low' | undefined (no badge). The message may contain simple markup.
-function setDetectStatus(t, level) {
-  if (detectText) detectText.innerHTML = t; else detectStatus.textContent = t;
-  if (gridConfEl) {
-    const labels = { high: 'GRID FOUND', med: 'CHECK THIS', low: 'NOT SURE' };
-    if (level && labels[level]) {
-      gridConfEl.textContent = labels[level];
-      gridConfEl.className = 'conf-badge conf-' + (level === 'med' ? 'med' : level);
-      gridConfEl.style.display = 'inline-block';
-    } else gridConfEl.style.display = 'none';
-  }
-  detectStatus.style.display = 'block';
-}
+function setDetectStatus(t) { detectStatus.textContent = t; detectStatus.style.display = 'block'; }
 
 // Guaranteed recovery: drop the four corners back to the default inset box, fully on-screen.
 // (Use this if a detected corner ever ends up hard to reach.)
-function resetBox() {
+function resetBox(prefix='') {
   if (!img || cropMode) return;
-  if (tapMode) leaveTapMode();
-  const w = canvas.width, h = canvas.height, ix = w * 0.15, iy = h * 0.15;
-  corners = [{ x: ix, y: iy }, { x: w - ix, y: iy }, { x: w - ix, y: h - iy }, { x: ix, y: h - iy }];
-  activeCorner = -1; snappedNow = false;
-  draw();
-  setDetectStatus('Box reset — drag each corner onto the large square; corners snap to the grid crossings. Then Flatten &amp; count.');
+  manualBoundary=true; marking=true; marked=[]; corners=[];
+  frameSquare=false; frameBoundary();
+  activeCorner=-1; snappedNow=false;
+  setDetectStatus((typeof prefix==='string'?prefix:'')+'Tap the top left corner of the large square (1 of 4).');
+  resetBoxBtn.textContent='Start corners again';
+  updateBoundaryAction(); draw();
 }
-
-/* ===========================================================================
-   TAP 4 CORNERS — the manual fallback that always works
-   ---------------------------------------------------------------------------
-   Auto-detection can only ever be a good guess: which square you meant to count
-   is your decision, not the computer's. Dragging four handles on a phone is slow
-   and fiddly, so this mode asks for four taps instead — top-left, top-right,
-   bottom-right, bottom-left — each snapping to the nearest grid crossing. Four
-   taps, done, no dragging.
-   =========================================================================== */
-function snapToNearestCrossing(p) {
-  if (!img || !snapTargetsImg.length) return p;
-  const s = canvas.width / img.naturalWidth;
-  // Forgiving of a fingertip, but not so wide that it can jump a whole division into the
-  // neighbouring square's finer ruling — which a 5%-of-width radius demonstrably could.
-  const radius = Math.max(10, canvas.width * 0.035);
-  let best = null, bd = radius;
-  for (const t of snapTargetsImg) {
-    const d = Math.hypot(p.x - t.x * s, p.y - t.y * s);
-    if (d < bd) { bd = d; best = { x: t.x * s, y: t.y * s }; }
-  }
-  return best || p;
-}
-function updateTapPrompt() {
-  if (!tapPrompt) return;
-  const n = tapPts.length;
-  tapPrompt.innerHTML = n >= 4
-    ? 'All four corners set. Press <strong>Flatten &amp; count</strong>.'
-    : `Tap ${n + 1} of 4: the <strong>${TAP_ORDER[n]}</strong> corner of the large square.`;
-}
-function enterTapMode() {
-  if (!img || cropMode) return;
-  tapMode = true; tapPts = []; activeCorner = -1;
-  if (tapActions) tapActions.style.display = 'flex';
-  if (tapCornersBtn) tapCornersBtn.disabled = true;
-  updateTapPrompt();
-  draw();
-}
-function leaveTapMode() {
-  tapMode = false; tapPts = [];
-  if (tapActions) tapActions.style.display = 'none';
-  if (tapCornersBtn) tapCornersBtn.disabled = false;
-}
-function addTapCorner(p) {
-  if (tapPts.length >= 4) return;
-  tapPts.push(clampCornerToCanvas(snapToNearestCrossing(p)));
-  updateTapPrompt();
-  if (tapPts.length === 4) {
-    corners = orderCorners(tapPts).map(clampCornerToCanvas);
-    leaveTapMode();
-    gridConfidence = 1;                                     // you placed it, so it is right
-    setDetectStatus('Corners set. Press <strong>Flatten &amp; count</strong>.', 'high');
-  }
-  draw();
-}
-function undoTapCorner() {
-  if (!tapPts.length) return;
-  tapPts.pop(); updateTapPrompt(); draw();
-}
-
-/* ---- box memory: reuse the framing from the last photo ----
-   With a fixed rig (phone on a stand over the eyepiece, or shooting the scope's screen — which is
-   how this one is used) every photo is framed almost identically, so last time's box is usually
-   right first try. Stored per profile as fractions of the photo, so it survives a different
-   camera resolution. */
-function captureLastBox() {
-  if (!img || corners.length !== 4) return;
-  const s = canvas.width / img.naturalWidth;
-  lastBoxNorm = corners.map((c) => ({ x: c.x / s / img.naturalWidth, y: c.y / s / img.naturalHeight }));
-  saveProfilePref();
-  updateLastBoxButton();
-}
-function applyLastBox() {
-  if (!img || !lastBoxNorm || lastBoxNorm.length !== 4) return;
-  const s = canvas.width / img.naturalWidth;
-  corners = lastBoxNorm
-    .map((n) => ({ x: n.x * img.naturalWidth * s, y: n.y * img.naturalHeight * s }))
-    .map(clampCornerToCanvas);
-  activeCorner = -1;
-  draw();
-  setDetectStatus('Using the box from your last photo. Nudge any corner that is off, then <strong>Flatten &amp; count</strong>.', 'med');
-}
-function updateLastBoxButton() {
-  if (!lastBoxBtn) return;
-  lastBoxBtn.style.display = (img && lastBoxNorm && lastBoxNorm.length === 4) ? '' : 'none';
-}
-
-if (tapCornersBtn) tapCornersBtn.addEventListener('click', enterTapMode);
-if (tapUndoBtn) tapUndoBtn.addEventListener('click', undoTapCorner);
-if (tapCancelBtn) tapCancelBtn.addEventListener('click', () => { leaveTapMode(); draw(); });
-if (lastBoxBtn) lastBoxBtn.addEventListener('click', applyLastBox);
-
-/* PERF + STORAGE: each saved square keeps a picture of the flattened field. It used to keep the
-   full 900x900 JPEG — ~80 kB per square in IndexedDB, and a synchronous toDataURL on every flatten.
-   A 200 px thumbnail is a twentieth of the size and encodes in a fraction of the time, and nothing
-   ever displays it larger than a list row. */
-function makeThumb(srcCanvas, side) {
-  try {
-    const oc = document.createElement('canvas');
-    oc.width = side; oc.height = side;
-    oc.getContext('2d').drawImage(srcCanvas, 0, 0, side, side);
-    return oc.toDataURL('image/jpeg', 0.7);
-  } catch (e) { dlog('thumb failed: ' + e.message); return null; }
-}
+document.getElementById('editBoundaryBtn').addEventListener('click',()=>{
+  const oldW=canvas.width,oldH=canvas.height;
+  setStage('boundary');
+  const {w,h}=computeFitSize();
+  setCanvasSize(w,h); corners=corners.map(p=>({x:p.x*w/oldW,y:p.y*h/oldH}));
+  frameBoundary();
+  updateBoundaryAction(); draw(); document.getElementById('boundaryTitle').focus();
+});
 
 /* ===========================================================================
    FLATTEN — perspective transform WITH a margin around the boundary
    =========================================================================== */
 flattenBtn.addEventListener('click', () => {
-  if (!cvReady || !img) return;
-  if (tapMode) {                       // half-way through tapping corners — finish or cancel first
-    setDetectStatus(`Tap the remaining corner${4 - tapPts.length === 1 ? '' : 's'} first (${tapPts.length} of 4 set), or press Cancel.`, 'med');
-    return;
-  }
-  showBusy('Flattening…');
+  if (!cvReady || !img || !updateBoundaryAction()) return;
+  showBusy('Straightening the square…');
   setTimeout(doFlatten, 30);
 });
 function doFlatten() {
+  let src, dst, srcTri, dstTri, Mtx;
   try {
-    captureLastBox();                  // remember this framing for the next photo
     const s = canvas.width / img.naturalWidth;
     const pts = corners.map((c) => ({ x: c.x / s, y: c.y / s }));
     const O = FLAT_OUT, M = FLAT_MARGIN;
 
-    const { mat: src, scale: g } = imreadScaled(FLAT_SRC_MAX);   // PERF: cap the warp source size
-    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2,
+    const scaled=imreadScaled(FLAT_SRC_MAX); src=scaled.mat; const g=scaled.scale;   // PERF: cap the warp source size
+    srcTri = cv.matFromArray(4, 1, cv.CV_32FC2,
       [pts[0].x * g, pts[0].y * g, pts[1].x * g, pts[1].y * g, pts[2].x * g, pts[2].y * g, pts[3].x * g, pts[3].y * g]);
-    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [M, M, O - M, M, O - M, O - M, M, O - M]); // inset by margin
-    const Mtx = cv.getPerspectiveTransform(srcTri, dstTri);
-    const dst = new cv.Mat();
+    dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [M, M, O - M, M, O - M, O - M, M, O - M]); // inset by margin
+    Mtx = cv.getPerspectiveTransform(srcTri, dstTri);
+    dst = new cv.Mat();
     // BORDER_REPLICATE (not CONSTANT/black): the margin corners of a tilted photo map outside the
     // source; replicating the edge pixel avoids ugly black triangles there (this is only the analysis
     // margin OUTSIDE the magenta boundary, so it never affects the count).
     cv.warpPerspective(src, dst, Mtx, new cv.Size(O, O), cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar());
     cv.imshow('flatCanvas', dst);
 
-    flatCleanData = flatCtx.getImageData(0, 0, O, O);          // clean pixels (for re-render + counting)
+    const fctx = flatCanvas.getContext('2d');
+    flatCleanData = fctx.getImageData(0, 0, O, O);             // clean pixels (for re-render + counting)
     freeSegCache();                                           // fresh flatten -> rebuild the seg cache
-    lastFlatClean = makeThumb(flatCanvas, 200);                // small keepsake stored with each square
+    lastFlatClean = flatCanvas.toDataURL('image/jpeg', 0.7);   // clean copy for saving
 
     cells = [];                                                // reset any previous count
     overlayVisible = true;
@@ -1425,14 +787,14 @@ function doFlatten() {
     updateSaveButton();
     renderFlat();                                              // clean image + magenta boundary marker
 
-    flatSection.style.display = 'block';
+    setStage('count');
     saveStatus.textContent = '';
-    src.delete(); dst.delete(); Mtx.delete(); srcTri.delete(); dstTri.delete();
-    flatCanvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    document.getElementById('reviewTitle').focus();
     countCells();                                              // go straight to counting (handles hideBusy)
   } catch (e) {
-    console.error('flatten error:', e); dlog('flatten FAILED: ' + e.message); hideBusy();
-  }
+    console.error('flatten error:', e); dlog('flatten FAILED: ' + e.message); setDetectStatus('Could not straighten this square. Check the four corners and try again.'); hideBusy();
+  } finally { [src,dst,Mtx,srcTri,dstTri].forEach(m=>{if(m)m.delete()}); }
 }
 
 /* ===========================================================================
@@ -1452,7 +814,7 @@ const BG_K = 25, LINE_LEN = 60, PEAK_SEP = 11, DIST_MIN = 2.0;
 const MIN_R = 2.5, MAX_R = 22;        // cell radius bounds (px in the 900 image)
 const RING_GAP = 6;                   // ring sits this far OUTSIDE the cell edge
 const ROW_BAND = 38;                  // reading-order row height for numbering
-const TAP_TOL = 16;                   // finger tolerance (screen px) beyond a ring
+const TAP_TOL = 7;                   // finger tolerance (screen px) beyond a ring
 const ADD_ROI = 46;                   // window (px) searched when you tap to add a cell
 const ONECLASS_T = 3.0;               // cell-line one-class outlier cutoff (normalized dist)
 
@@ -1563,7 +925,7 @@ function assignNumbers() {
 /* ---- drawing the overlay ---- */
 function renderFlat() {
   if (!flatCleanData) return;
-  const fctx = flatCtx;
+  const fctx = flatCanvas.getContext('2d');
   fctx.putImageData(flatCleanData, 0, 0);
   drawBoundaryMarker(fctx);
   if (trainingMode) { drawTrainCandidates(fctx); return; }
@@ -1620,45 +982,64 @@ function freeSegCache() { if (segTophat) { try { segTophat.delete(); } catch (_)
 function ensureSegCache() {
   if (segTophat) return true;
   if (!flatCleanData) return false;
-  let rgba = null, gray = null, kBg = null, tmp = null;
+  let rgba, gray, kBg, th, horizontal, vertical, hKernel, vKernel, roi, tmp;
   try {
     rgba = cv.matFromImageData(flatCleanData);
     gray = new cv.Mat(); cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    const samples=[];
+    for(let y=FLAT_MARGIN+8;y<FLAT_OUT-FLAT_MARGIN;y+=19) {
+      for(let x=FLAT_MARGIN+8;x<FLAT_OUT-FLAT_MARGIN;x+=19) samples.push(gray.data[y*gray.cols+x]);
+    }
+    samples.sort((a,b)=>a-b);
+    const appearance=document.getElementById('cellContrast').value;
+    if (appearance==='dark' || (appearance==='auto' && samples[Math.floor(samples.length/2)]>150)) {
+      cv.bitwise_not(gray,gray);
+    }
     kBg = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(BG_K, BG_K));
-    const th = new cv.Mat(); cv.morphologyEx(gray, th, cv.MORPH_TOPHAT, kBg);
+    th = new cv.Mat(); cv.morphologyEx(gray, th, cv.MORPH_TOPHAT, kBg);
+    // Subtract the intensity of long rulings before thresholding. A bright cell
+    // touching a ruling can still have a local peak above the ruling itself.
+    hKernel=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(LINE_LEN,1));
+    vKernel=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(1,LINE_LEN));
+    horizontal=new cv.Mat(); vertical=new cv.Mat();
+    cv.morphologyEx(th,horizontal,cv.MORPH_OPEN,hKernel);
+    cv.morphologyEx(th,vertical,cv.MORPH_OPEN,vKernel);
+    cv.max(horizontal,vertical,horizontal);
+    cv.subtract(th,horizontal,th);
+    const side=FLAT_OUT-2*FLAT_MARGIN;
+    roi=th.roi(new cv.Rect(FLAT_MARGIN,FLAT_MARGIN,side,side));
     tmp = new cv.Mat();
-    segOtsu = cv.threshold(th, tmp, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
-    segTophat = th;                                // keep (freed by freeSegCache)
+    segOtsu = cv.threshold(roi, tmp, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
+    segTophat = th; th=null;
     return true;
   } catch (e) { dlog('seg-cache FAILED: ' + e.message); freeSegCache(); return false; }
-  finally { [rgba, gray, kBg, tmp].forEach((m) => { if (m) { try { m.delete(); } catch (_) {} } }); }
+  finally { [rgba,gray,kBg,th,horizontal,vertical,hKernel,vKernel,roi,tmp].forEach(m=>{if(m)m.delete()}); }
 }
 
 function segmentBlobs(sv) {
   const O = FLAT_OUT, out = [];
   const sp = sensParams(sv);
-  if (!ensureSegCache() || !segTophat) return out;
-  let bin=null, hK=null, vK=null,
-      hL=null, vL=null, lines=null, noLines=null, kOpen=null, dist=null, distB=null,
+  if (!ensureSegCache()) throw new Error('Could not read the counting square');
+  let bin=null, core=null, grown=null, vicinity=null, kOpen=null, dist=null, distB=null,
       sep=null, maxd=null, isMax=null, strongF=null, strong8=null, seeds=null,
       lbl=null, stats=null, cent=null;
   try {
     // sensitivity-adjusted threshold on the CACHED top-hat (+ cached Otsu base)
     bin = new cv.Mat();
-    cv.threshold(segTophat, bin, clamp(segOtsu * sp.thrMul, 1, 254), 255, cv.THRESH_BINARY);
-
-    // remove grid LINES (long thin) so they aren't counted and don't merge cells
-    hK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(LINE_LEN, 1));
-    vK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(1, LINE_LEN));
-    hL = new cv.Mat(); cv.morphologyEx(bin, hL, cv.MORPH_OPEN, hK);
-    vL = new cv.Mat(); cv.morphologyEx(bin, vL, cv.MORPH_OPEN, vK);
-    lines = new cv.Mat(); cv.bitwise_or(hL, vL, lines);
-    noLines = new cv.Mat(); cv.subtract(bin, lines, noLines);
+    const threshold=clamp(segOtsu*sp.thrMul,7,254);
+    core=new cv.Mat();
+    cv.threshold(segTophat,core,threshold,255,cv.THRESH_BINARY);
+    // Grow strong cell cores into their dimmer edges. This reconnects lobes of
+    // a cell over a grid crossing without admitting isolated dim field noise.
+    vicinity=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(9,9));
+    grown=new cv.Mat(); cv.dilate(core,grown,vicinity);
+    cv.threshold(segTophat,bin,Math.max(5,threshold*0.55),255,cv.THRESH_BINARY);
+    cv.bitwise_and(bin,grown,bin);
     kOpen = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
-    cv.morphologyEx(noLines, noLines, cv.MORPH_OPEN, kOpen);
+    cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kOpen);
 
     // distance transform -> each cell becomes a "hill"; its peak marks the centre.
-    dist = new cv.Mat(); cv.distanceTransform(noLines, dist, cv.DIST_L2, 5);
+    dist = new cv.Mat(); cv.distanceTransform(bin, dist, cv.DIST_L2, 5);
     distB = new cv.Mat(); cv.GaussianBlur(dist, distB, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
 
     // LOCAL MAXIMA = peaks (PEAK_SEP ~ one cell diameter -> splits touching cells)
@@ -1671,19 +1052,30 @@ function segmentBlobs(sv) {
 
     lbl = new cv.Mat(); stats = new cv.Mat(); cent = new cv.Mat();
     const nLab = cv.connectedComponentsWithStats(seeds, lbl, stats, cent, 8, cv.CV_32S);
+    const strongPixels=core.data;
     for (let i = 1; i < nLab; i++) {
       const cx = cent.doubleAt(i, 0), cy = cent.doubleAt(i, 1);
       const xx = clamp(Math.round(cx), 0, O - 1), yy = clamp(Math.round(cy), 0, O - 1);
       const r = dist.floatAt(yy, xx);
       if (r < sp.minR || r > MAX_R) continue;
+      // Expansion may expose several weak bumps beside one bright object.
+      // Each centre needs at least a small patch of the original strong signal.
+      let strong=0;
+      const reach=Math.max(2,Math.min(4,Math.round(r*0.7)));
+      for (let y=Math.max(0,yy-reach); y<=Math.min(O-1,yy+reach); y++) {
+        for (let x=Math.max(0,xx-reach); x<=Math.min(O-1,xx+reach); x++) {
+          if (strongPixels[y*O+x]) strong++;
+        }
+      }
+      if (strong < Math.max(3,(2*reach+1)**2*0.14)) continue;
       const fp = featuresAt(cx, cy, r);
       out.push({ x: cx, y: cy, r, area: Math.round(Math.PI * r * r), ...fp });
     }
     return out;
   } catch (e) {
-    console.error('segment error:', e); dlog('segment FAILED: ' + e.message); return out;
+    dlog('segment FAILED: ' + e.message); throw e;
   } finally {
-    [bin,hK,vK,hL,vL,lines,noLines,kOpen,dist,distB,sep,maxd,isMax,strongF,strong8,seeds,lbl,stats,cent]
+    [bin,core,grown,vicinity,kOpen,dist,distB,sep,maxd,isMax,strongF,strong8,seeds,lbl,stats,cent]
       .forEach((m) => { if (m) { try { m.delete(); } catch (_) {} } });
   }
 }
@@ -1697,7 +1089,7 @@ function countCells(quiet) {
   setTimeout(() => { try { runCount(); } finally { if (!quiet) hideBusy(); } }, quiet ? 0 : 30);
 }
 function runCount() {
-  cells = [];
+  cells = []; hasCount=false; updateSaveButton();
   try {
     computeBackgroundBlueness();                          // field reference for RELATIVE dead detection
     const blobs = segmentBlobs(sensitivity);
@@ -1726,7 +1118,7 @@ function runCount() {
     const hidden = cells.filter((c) => c.autoHidden).length;
     dlog(`counted: ${inN} in, trypan ${trypanOn ? 'on' : 'off'}, sens ${sensitivity}, dead ${deadLevel}` + (hidden ? `, hid ${hidden}` : ''));
     let msg = cells.length === 0
-      ? 'No cells found. Raise "Detection sensitivity", or say "too few / none".'
+      ? 'No cells found. Tap a missed cell to add it, or adjust detection sensitivity in Count settings.'
       : 'Tap a ring to cycle it' + (trypanOn ? ' (live\u2194dead \u2192 remove \u2192 back)' : ' (remove \u2192 restore)') + '. Tap a missed cell to add it.';
     if (activeCellLineId != null && classifierReady() && hidden > 0)
       msg += ` \u00B7 learning hid ${hidden} look-alike${hidden === 1 ? '' : 's'} (tap to keep).`;
@@ -1930,6 +1322,7 @@ function liveDeadTotals() {                          // detector counts + manual
 }
 function updateReadout() {
   const { total, live, dead } = liveDeadTotals();
+  document.getElementById('totalCells').textContent=total;
   let txt = `Total ${total}`;
   if (trypanOn) {
     const v = total > 0 ? Math.round((live / total) * 100) : 0;
@@ -1942,6 +1335,7 @@ function updateReadout() {
   } else {
     txt += `\n\u2248 ${fmtConcUnit(totalConc)}  (this square)`;
   }
+  document.getElementById('stainNote').textContent=(trypanOn?'Trypan blue':'Unstained')+' · '+dilution+'× dilution';
   countReadout.textContent = txt;
   countReadout.style.display = 'block';
   updateCountHint(total);
@@ -2046,18 +1440,19 @@ function addCellAt(x, y) {
 }
 // find the bright blob under/near a tap (pure JS on the clean pixels — no cv, no leaks)
 function detectBlobNear(tx, ty) {
-  const data = flatCleanData.data, W = FLAT_OUT, half = Math.floor(ADD_ROI / 2);
+  if (!segTophat) return null;
+  const data=segTophat.data, W=FLAT_OUT, half=Math.floor(ADD_ROI/2);
   const x0 = clamp(Math.round(tx) - half, 1, W - 2), x1 = clamp(Math.round(tx) + half, 1, W - 2);
   const y0 = clamp(Math.round(ty) - half, 1, W - 2), y1 = clamp(Math.round(ty) + half, 1, W - 2);
   if (x1 <= x0 || y1 <= y0) return null;
   let mean = 0, mx = 0, cnt = 0;
-  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const g = grayAt(data, W, x, y); mean += g; if (g > mx) mx = g; cnt++; }
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const g = data[y*W+x]; mean += g; if (g > mx) mx = g; cnt++; }
   mean /= cnt;
   const thr = Math.max(mean + 12, mx * 0.55);
   let sx = -1, sy = -1, sb = -1;
   for (let y = clamp(Math.round(ty) - 10, y0, y1); y <= clamp(Math.round(ty) + 10, y0, y1); y++)
     for (let x = clamp(Math.round(tx) - 10, x0, x1); x <= clamp(Math.round(tx) + 10, x0, x1); x++) {
-      const g = grayAt(data, W, x, y); if (g > sb) { sb = g; sx = x; sy = y; }
+      const g = data[y*W+x]; if (g > sb) { sb = g; sx = x; sy = y; }
     }
   if (sb < thr) return null;
   const seen = new Set(), stack = [[sx, sy]]; let n = 0, cxs = 0, cys = 0;
@@ -2065,7 +1460,7 @@ function detectBlobNear(tx, ty) {
     const p = stack.pop(), x = p[0], y = p[1];
     if (x < x0 || x > x1 || y < y0 || y > y1) continue;
     const k = y * W + x; if (seen.has(k)) continue;
-    if (grayAt(data, W, x, y) < thr) continue;
+    if (data[y*W+x] < thr) continue;
     seen.add(k); n++; cxs += x; cys += y;
     stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
     if (n > 4000) break;
@@ -2093,6 +1488,8 @@ function showCountTools(on) {
 
 /* ---- Reset to defaults / Show-hide circles (replace the old "Count again") ---- */
 function resetCountDefaults() {
+  document.getElementById('cellContrast').value='auto';
+  freeSegCache();
   sensitivity = 5;
   if (sensSlider) sensSlider.value = 5;
   if (sensLabel) sensLabel.textContent = 5;
@@ -2139,6 +1536,10 @@ flatCanvas.addEventListener('pointerup', _endFlatPtr);
 flatCanvas.addEventListener('pointercancel', (e) => { _activePtrs.delete(e.pointerId); _tapStart = null; _tapCancelled = true; });
 
 resetBtn.addEventListener('click', resetCountDefaults);
+document.getElementById('cellContrast').addEventListener('change',()=>{
+  freeSegCache();
+  countCells();
+});
 toggleOverlayBtn.addEventListener('click', toggleOverlay);
 trypanYes.addEventListener('click', () => setTrypan(true));
 trypanNo.addEventListener('click', () => setTrypan(false));
@@ -2626,10 +2027,7 @@ async function loadProfilePref() {
     trypanOn = (p && typeof p.trypanPref === 'boolean') ? p.trypanPref : true;                       // remembered Trypan choice
     dilution = (p && typeof p.dilutionPref === 'number' && p.dilutionPref >= 1) ? p.dilutionPref : 2; // remembered dilution
     profileRecentCounts = (p && Array.isArray(p.recentCounts)) ? p.recentCounts.filter((n) => isFinite(n) && n > 0).slice(0, 8) : [];
-    lastBoxNorm = (p && Array.isArray(p.lastBox) && p.lastBox.length === 4 &&
-                   p.lastBox.every((c) => c && isFinite(c.x) && isFinite(c.y))) ? p.lastBox : null;
-  } catch (_) { deadLevel = 5; sensitivity = 5; concUnit = 'mL'; trypanOn = true; dilution = 2; profileRecentCounts = []; lastBoxNorm = null; }
-  updateLastBoxButton();
+  } catch (_) { deadLevel = 5; sensitivity = 5; concUnit = 'mL'; trypanOn = true; dilution = 2; profileRecentCounts = []; }
   if (blueSlider) blueSlider.value = deadLevel;
   if (blueLabel) blueLabel.textContent = deadLevel;
   if (sensSlider) sensSlider.value = sensitivity;
@@ -2641,23 +2039,13 @@ async function loadProfilePref() {
   if (trypanNo) trypanNo.classList.toggle('active', !trypanOn);
   renderCalcRecent();
 }
-// PERF: dragging a slider fires `input` on every pixel of travel, and each one used to queue a
-// full IndexedDB read-modify-write. Coalesce them — the last value within 400 ms is the one that
-// matters, and nothing reads these back until the next profile load.
-let _prefTimer = null;
-function saveProfilePref() {
-  if (!storageOK || activeProfileId == null) return;
-  clearTimeout(_prefTimer);
-  _prefTimer = setTimeout(flushProfilePref, 400);
-}
-async function flushProfilePref() {
+async function saveProfilePref() {
   if (!storageOK || activeProfileId == null) return;
   try {
     const p = await pGet('profiles', Number(activeProfileId));
     if (!p) return;
     p.deadLevel = deadLevel; p.sensitivity = sensitivity; p.concUnit = concUnit;
     p.trypanPref = trypanOn; p.dilutionPref = dilution;   // remember Trypan + dilution per profile
-    p.lastBox = lastBoxNorm;                              // remember the last boundary framing
     await pPut('profiles', p);
   } catch (e) { dlog('pref save failed: ' + e.message); }
 }
@@ -2679,104 +2067,31 @@ function concPerML(arr) {
   const m = arr.length || 1;
   return arr.reduce((a, s) => a + Math.max(0, s.trypanOn ? s.live : s.total) * (s.dilution > 1 ? s.dilution : 1) * 1e4, 0) / m;
 }
-/* ---- editing a saved square (request 3) ----
-   The common case: you added three squares before noticing the dilution factor was wrong. Nothing
-   about a saved square is derived from the photo any more — it is just numbers — so it can simply
-   be edited in place. Viability is recomputed rather than stored twice. */
-let editingSquareId = null;
-
-function buildSquareEditor(s, onDone) {
-  const box = document.createElement('div'); box.className = 'sample-edit';
-  const mk = (labelText, value, step, min) => {
-    const wrap = document.createElement('span'); wrap.className = 'field';
-    const lab = document.createElement('span'); lab.textContent = labelText;
-    const inp = document.createElement('input');
-    inp.className = 'num-input'; inp.type = 'number'; inp.inputMode = 'decimal';
-    inp.step = step; inp.min = min; inp.value = String(value);
-    wrap.appendChild(lab); wrap.appendChild(inp); box.appendChild(wrap);
-    return inp;
-  };
-  const stainWrap = document.createElement('label'); stainWrap.className = 'check';
-  const stain = document.createElement('input'); stain.type = 'checkbox'; stain.checked = !!s.trypanOn;
-  stainWrap.appendChild(stain); stainWrap.appendChild(document.createTextNode('Trypan blue'));
-
-  const liveIn = mk(s.trypanOn ? 'Live' : 'Cells', s.live, '1', '0');
-  const deadIn = mk('Dead', s.dead, '1', '0');
-  const dilIn  = mk('Dilution ×', (s.dilution > 1 ? s.dilution : 1), '0.5', '0');
-  box.appendChild(stainWrap);
-
-  const syncStain = () => {                    // "Dead" only means something when the sample was stained
-    deadIn.parentElement.style.display = stain.checked ? '' : 'none';
-    liveIn.parentElement.firstChild.textContent = stain.checked ? 'Live' : 'Cells';
-  };
-  stain.addEventListener('change', syncStain); syncStain();
-
-  const acts = document.createElement('span'); acts.className = 'edit-actions';
-  const save = document.createElement('button'); save.className = 'mini-btn'; save.textContent = 'Save';
-  const cancel = document.createElement('button'); cancel.className = 'mini-btn'; cancel.textContent = 'Cancel';
-  acts.appendChild(save); acts.appendChild(cancel); box.appendChild(acts);
-
-  cancel.addEventListener('click', () => { editingSquareId = null; onDone(); });
-  save.addEventListener('click', async () => {
-    const on = stain.checked;
-    const live = Math.max(0, Math.round(parseFloat(liveIn.value) || 0));
-    const dead = on ? Math.max(0, Math.round(parseFloat(deadIn.value) || 0)) : 0;
-    const dv = parseFloat(dilIn.value);
-    const dil = (isFinite(dv) && dv > 1) ? dv : 1;
-    const total = live + dead;
-    try {
-      const rec = await pGet('squares', s.id);
-      if (!rec) { editingSquareId = null; onDone(); return; }
-      rec.live = live; rec.dead = dead; rec.total = total; rec.trypanOn = on; rec.dilution = dil;
-      rec.viability = total > 0 ? Math.round((live / total) * 100) : 0;
-      rec.editedAt = Date.now();
-      await pPut('squares', rec);
-      dlog(`edited square ${s.id}: total ${total}, live ${live}, dead ${dead}, dil ${dil}`);
-      saveStatus.textContent = 'square updated ✓';
-    } catch (e) { dlog('square edit failed: ' + e.message); saveStatus.textContent = 'edit failed'; }
-    editingSquareId = null; onDone();
-  });
-  return box;
-}
-
 async function refreshSampleView() {
   if (!storageOK) return;
   let rows = [];
   try { rows = await pByProfile('squares', Number(activeProfileId)); } catch (e) { dlog('sample view failed: ' + e.message); rows = []; }
   const all = rows.filter((s) => s && s.sampleId === currentSampleId).sort((a, b) => a.createdAt - b.createdAt);
+  document.getElementById('squareTally').textContent=all.length+' square'+(all.length===1?'':'s');
+  document.getElementById('session').dataset.empty=String(all.length===0 && prevSampleId==null && !deletedStack.length);
   sampleList.innerHTML = '';
   all.forEach((s, i) => {
     const row = document.createElement('div'); row.className = 'sample-item';
     const via = s.trypanOn ? ` · ${s.viability}% viable` : '';
-    const dil = (s.dilution > 1 ? s.dilution : 1);
-    const span = document.createElement('span');
-    span.innerHTML = `Square ${i + 1}: <strong>${s.total}</strong> cells${via} · ×${dil}`;
-    const acts = document.createElement('span'); acts.className = 'row-actions';
-    const edit = document.createElement('button');
-    edit.className = 'x-btn'; edit.textContent = '✎'; edit.title = 'edit this square (counts, dilution, staining)';
-    edit.addEventListener('click', () => { editingSquareId = (editingSquareId === s.id) ? null : s.id; refreshSampleView(); });
+    const span = document.createElement('span'); span.innerHTML = `Square ${i + 1}: <strong>${s.total}</strong> cells${via}`;
     const del = document.createElement('button'); del.className = 'x-btn'; del.textContent = '✕'; del.title = 'remove this square';
     del.addEventListener('click', async () => {
       deletedStack.push(Object.assign({}, s)); updateUndoButton();
       await pDelete('squares', s.id); dlog(`removed square id ${s.id}`);
       await refreshSampleView();
     });
-    acts.appendChild(edit); acts.appendChild(del);
-    row.appendChild(span); row.appendChild(acts);
-    if (editingSquareId === s.id) row.appendChild(buildSquareEditor(s, refreshSampleView));
-    sampleList.appendChild(row);
+    row.appendChild(span); row.appendChild(del); sampleList.appendChild(row);
   });
   updateUndoButton();
   if (exportCsvBtn) exportCsvBtn.disabled = !(storageOK && all.length);   // nothing to export until a square is added
-  if (clearSessionBtn) clearSessionBtn.style.display = all.length ? '' : 'none';
-  if (sessionDilRow) sessionDilRow.style.display = all.length ? 'flex' : 'none';
-  if (sessionDilInput && document.activeElement !== sessionDilInput) {
-    const dils = [...new Set(all.map((s) => (s.dilution > 1 ? s.dilution : 1)))];
-    sessionDilInput.value = String(dils.length === 1 ? dils[0] : (dilution > 1 ? dilution : 1));
-  }
   if (all.length === 0) {
     sessionSquares = [];
-    sampleSummary.textContent = 'No squares yet — count a square, then press “＋ Add this square to the session”.';
+    sampleSummary.textContent = 'Saved squares and their average appear here.';
     sampleSummary.style.display = 'block'; updateSaveButton(); updateCalc(); return;
   }
   const m = all.length;
@@ -2816,6 +2131,7 @@ function updateUndoSessionButton() {
   if (!undoSessionBtn) return;
   const can = storageOK && prevSampleId != null && prevSampleId !== currentSampleId;
   undoSessionBtn.style.display = can ? '' : 'none';
+  if (can) document.getElementById('session').dataset.empty='false';
 }
 async function undoNewSession() {
   if (prevSampleId == null) return;
@@ -2932,8 +2248,7 @@ async function refreshHistory() {
   });
 }
 function updateSaveButton() {
-  const counted = cells.some(isCounted) || manualLive > 0 || manualDead > 0;
-  saveBtn.disabled = !(storageOK && hasCount && counted && !savedThisCount);
+  saveBtn.disabled = !(storageOK && hasCount && !savedThisCount);
   saveBtn.textContent = savedThisCount ? 'Added to session ✓' : 'Add square to session';
 }
 async function initStorage() {
@@ -2970,56 +2285,11 @@ newProfileBtn.addEventListener('click', async () => {
 });
 if (deleteProfileBtn) deleteProfileBtn.addEventListener('click', deleteProfile);
 newSessionBtn.addEventListener('click', async () => {
-  // "New session" is non-destructive (the squares stay under Past sessions), but to a first-time
-  // user the list emptying looks exactly like losing the work — so say what will happen.
-  if (sessionSquares.length &&
-      !confirm(`Start a new session?\n\nThe ${sessionSquares.length} square${sessionSquares.length === 1 ? '' : 's'} you counted stay saved under “Past sessions” — this list just starts empty for the next sample.`)) return;
   const before = currentSampleId;                 // remember so an accidental New session can be undone
   await startNewSession();
   prevSampleId = before;
   updateUndoSessionButton();
   saveStatus.textContent = 'new session';
-});
-
-/* ---- destructive: delete every square in this session (warned, and undoable) ---- */
-if (clearSessionBtn) clearSessionBtn.addEventListener('click', async () => {
-  if (!storageOK) return;
-  const n = sessionSquares.length;
-  if (!n) return;
-  if (!confirm(`Delete all ${n} square${n === 1 ? '' : 's'} in this session?\n\nThis erases the counts themselves — not just this list. Use “＋ New session” instead if you only want to start the next sample.`)) return;
-  for (const s of sessionSquares.slice().reverse()) {
-    deletedStack.push(Object.assign({}, s));
-    try { await pDelete('squares', s.id); } catch (e) { dlog('clear session: ' + e.message); }
-  }
-  dlog(`cleared session (${n} squares removed, undo available)`);
-  await refreshSampleView(); await refreshHistory();
-  saveStatus.textContent = `cleared ${n} square${n === 1 ? '' : 's'} — “Undo remove” brings them back`;
-});
-
-/* ---- fix a dilution factor picked by mistake, across every square at once (request 3) ---- */
-if (sessionDilApply) sessionDilApply.addEventListener('click', async () => {
-  if (!storageOK || !sessionSquares.length) return;
-  const v = parseFloat(sessionDilInput ? sessionDilInput.value : '');
-  const dil = (isFinite(v) && v > 1) ? v : 1;
-  if (!confirm(`Set the dilution factor to ×${dil} on all ${sessionSquares.length} square${sessionSquares.length === 1 ? '' : 's'} in this session?\n\nThe cell counts stay the same; only the concentration is recalculated.`)) return;
-  let n = 0;
-  for (const s of sessionSquares) {
-    try { const rec = await pGet('squares', s.id); if (!rec) continue; rec.dilution = dil; rec.editedAt = Date.now(); await pPut('squares', rec); n++; }
-    catch (e) { dlog('bulk dilution failed: ' + e.message); }
-  }
-  dilution = dil;                                  // and use it for the next square you count
-  if (dilutionInput) dilutionInput.value = String(dil);
-  saveProfilePref();
-  updateReadout();
-  await refreshSampleView();
-  dlog(`applied dilution ×${dil} to ${n} squares`);
-  saveStatus.textContent = `dilution ×${dil} applied to ${n} square${n === 1 ? '' : 's'}`;
-});
-
-/* ---- the obvious next step after adding a square: go shoot the next one ---- */
-if (nextSquareBtn) nextSquareBtn.addEventListener('click', () => {
-  nextSquareBtn.style.display = 'none';
-  cameraInput.click();
 });
 undoBtn.addEventListener('click', doUndo);
 if (undoSessionBtn) undoSessionBtn.addEventListener('click', undoNewSession);
@@ -3028,7 +2298,8 @@ if (saveImgBtn) saveImgBtn.addEventListener('click', saveAnnotatedImage);
 saveBtn.addEventListener('click', async () => {
   if (!storageOK) { saveStatus.textContent = 'storage unavailable'; return; }
   if (!hasCount) { saveStatus.textContent = 'count a square first'; return; }
-  if (savedThisCount) return;
+  if (savedThisCount || saveBtn.disabled) return;
+  saveBtn.disabled=true;
   try {
     const c = summarizeCounts();
     await pAdd('squares', {
@@ -3039,56 +2310,54 @@ saveBtn.addEventListener('click', async () => {
     savedThisCount = true;
     dlog(`added square: total ${c.total}, live ${c.live}, dead ${c.dead}, dil ${dilution}`);
     await refreshSampleView();
-    saveStatus.textContent = 'added ✓';
-    // Make the next step impossible to miss — this is the step people used to get stuck on.
-    if (nextSquareBtn) {
-      const n = sessionSquares.length;
-      nextSquareBtn.textContent = n >= 4 ? '📷 Count another square (4 is usually enough)' : `📷 Count another square (${n} of 4)`;
-      nextSquareBtn.style.display = 'block';
-      nextSquareBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  } catch (e) { console.error('save failed:', e); dlog('save FAILED: ' + e.message); saveStatus.textContent = 'save failed'; }
+    saveStatus.textContent = '';
+    document.querySelector('#changePhoto summary').textContent='Photo for next square';
+    document.getElementById('changePhoto').open=true;
+  } catch (e) { console.error('save failed:', e); dlog('save FAILED: ' + e.message); saveStatus.textContent = 'Could not save this square. Try again.'; updateSaveButton(); }
 });
 
 /* ---- tiny debug log wiring (the _logLines/dlog definition was moved up near the top
         so the OpenCV loader can safely log during boot without a TDZ error) ---- */
-// Preferences are written on a 400 ms debounce; make sure a pending one isn't lost when the phone
-// backgrounds the tab (Android can freeze or kill it without ever firing `unload`).
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_prefTimer); flushProfilePref(); } });
-window.addEventListener('pagehide', () => { clearTimeout(_prefTimer); flushProfilePref(); });
-
 window.addEventListener('error', (e) => dlog('JS ERROR: ' + (e.message || (e.error && e.error.message) || 'unknown')));
 window.addEventListener('unhandledrejection', (e) => dlog('PROMISE REJECTED: ' + ((e.reason && e.reason.message) || e.reason)));
 if (debugCopy) debugCopy.addEventListener('click', () => { if (navigator.clipboard) navigator.clipboard.writeText(_logLines.join('\n')); });
 if (debugClear) debugClear.addEventListener('click', () => { _logLines.length = 0; debugLog.textContent = ''; });
 
-/* ---- ?selftest=1 — run the grid detector against known-answer synthetic chambers ----
-   Opt-in via the URL and nothing else, so it costs a normal user nothing. It exists because the
-   phone this has to work on is not the machine it is written on: open
-   <your-pages-url>/?selftest=1 on that phone and the Debug log fills with pass/fail per case. */
-if (/[?&]selftest=1\b/.test(location.search)) {
-  const runSelfTest = () => {
-    const sc = document.createElement('script');
-    sc.src = 'dev/grid-test.js';
-    sc.onload = () => { if (typeof window.__gridSelfTest === 'function') window.__gridSelfTest(); };
-    sc.onerror = () => dlog('self-test: dev/grid-test.js not found (it is a development file)');
-    document.head.appendChild(sc);
-  };
-  const waitForCv = () => { if (cvReady) runSelfTest(); else setTimeout(waitForCv, 200); };
-  waitForCv();
-}
-
-/* ---- offline cache (sw.js) ----
-   The one thing that made every session start slowly was re-downloading the 13 MB vision engine.
-   The worker keeps it on the device, so the second visit onward opens straight into counting even
-   with no signal. Registered LAST and fully guarded: a browser that refuses service workers (older
-   Android WebView, some private modes) or a file:// page just carries on without it. */
-if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js')
-      .then(() => dlog('offline cache active'))
-      .catch((e) => dlog('offline cache unavailable: ' + e.message));
-  });
-}
-
 initStorage();
+/* The reference shows one entire corner square and the narrower neighboring rulings. */
+function drawGridReference() {
+  const el=document.getElementById('guide'), pen=el.getContext('2d');
+  const w=el.width,h=el.height;
+  pen.fillStyle='#173f34'; pen.fillRect(0,0,w,h);
+  function line(ax,ay,bx,by,color,weight) {
+    pen.strokeStyle=color; pen.lineWidth=weight; pen.beginPath(); pen.moveTo(ax,ay); pen.lineTo(bx,by); pen.stroke();
+  }
+  for (let x=12;x<w;x+=24) for(let y=12;y<h;y+=24) {
+    pen.fillStyle='#325449'; pen.fillRect(x,y,1.5,1.5);
+  }
+  // Project a square at a slight angle, as it appears on a photographed display.
+  function p(u,v) { return {x:208+359*u+27*v-12*u*v,y:51-21*u+268*v+8*u*v}; }
+  function ruling(u,v,U,V,color,width) { const a=p(u,v),b=p(U,V);line(a.x,a.y,b.x,b.y,color,width); }
+  const q=[p(0,0),p(1,0),p(1,1),p(0,1)];
+  pen.beginPath(); q.forEach((k,i)=>i?pen.lineTo(k.x,k.y):pen.moveTo(k.x,k.y)); pen.closePath(); pen.fillStyle='#254d3d';pen.fill();
+  for (const u of [-.52,-.29,-.017,0,.25,.5,.75,1,1.018,1.12,1.22,1.32,1.42,1.52,1.62]) {
+    ruling(u,-.2,u,1.5,'#577564',1.6);
+  }
+  for (const v of [-.18,-.018,0,.25,.5,.75,1,1.018,1.26]) ruling(-.32,v,1.68,v,'#688270',1.6);
+  for (const v of [.25,.5,.75]) {
+    ruling(0,v,1,v,'#a6be9b',2); ruling(v,0,v,1,'#a6be9b',2);
+  }
+  for (let i=0;i<4;i++) {
+    const a=q[i],b=q[(i+1)%4];line(a.x,a.y,b.x,b.y,'#c7ed89',3.5);
+  }
+  for (const a of q) {
+    pen.fillStyle='#d7f39f';pen.fillRect(a.x-5,a.y-5,10,10);
+  }
+  const a=p(0,1.14),b=p(1,1.14);
+  line(a.x,a.y,b.x,b.y,'#c2d4bc',1.5);
+  for(const t of [a,b]) line(t.x,t.y-6,t.x,t.y+6,'#c2d4bc',1.5);
+  pen.save();pen.translate((a.x+b.x)/2,(a.y+b.y)/2);pen.rotate(-.035);
+  pen.fillStyle='#173f34';pen.fillRect(-42,-15,84,30);
+  pen.fillStyle='#dce6d6';pen.font='22px Consolas, monospace';pen.textAlign='center';pen.fillText('1 mm',0,7);pen.restore();
+}
+drawGridReference();
